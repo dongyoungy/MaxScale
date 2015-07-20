@@ -65,24 +65,7 @@
 
 static int  blr_file_create(ROUTER_INSTANCE *router, char *file);
 static void blr_file_append(ROUTER_INSTANCE *router, char *file);
-static void blr_log_header(int priority, char *msg, uint8_t *ptr);
-void blr_cache_read_master_data(ROUTER_INSTANCE *router);
-int blr_file_get_next_binlogname(ROUTER_INSTANCE *router);
-int blr_file_new_binlog(ROUTER_INSTANCE *router, char *file);
-void blr_file_use_binlog(ROUTER_INSTANCE *router, char *file);
-int blr_file_write_master_config(ROUTER_INSTANCE *router, char *error);
-extern uint32_t extract_field(uint8_t *src, int bits);
-static void blr_format_event_size(double *event_size, char *label);
-extern int MaxScaleUptime();
-extern char *blr_get_event_description(ROUTER_INSTANCE *router, uint8_t event);
-
-typedef struct binlog_event_desc {
-	unsigned long long event_pos;
-	uint8_t	event_type;
-	time_t	event_time;
-} BINLOG_EVENT_DESC;
-
-static void blr_print_binlog_details(ROUTER_INSTANCE *router, BINLOG_EVENT_DESC first_event_time, BINLOG_EVENT_DESC last_event_time);
+static void blr_log_header(logfile_id_t file, char *msg, uint8_t *ptr);
 
 /**
  * Initialise the binlog file for this instance. MaxScale will look
@@ -668,7 +651,6 @@ blr_close_binlog(ROUTER_INSTANCE *router, BLFILE *file)
 		close(file->fd);
 		file->fd = -1;
 		free(file);
-	}
 }
 
 /**

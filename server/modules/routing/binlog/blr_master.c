@@ -87,7 +87,6 @@ static int  blr_rotate_event(ROUTER_INSTANCE *router, uint8_t *pkt, REP_HEADER *
 void blr_distribute_binlog_record(ROUTER_INSTANCE *router, REP_HEADER *hdr, uint8_t *ptr);
 static void *CreateMySQLAuthData(char *username, char *password, char *database);
 void blr_extract_header(uint8_t *pkt, REP_HEADER *hdr);
-inline uint32_t extract_field(uint8_t *src, int bits);
 static void blr_log_packet(logfile_id_t file, char *msg, uint8_t *ptr, int len);
 static void blr_master_close(ROUTER_INSTANCE *);
 static char *blr_extract_column(GWBUF *buf, int col);
