@@ -201,24 +201,17 @@ char	*defuuid;
 	if(service->credentials.name == NULL ||
 	   service->credentials.authdata == NULL)
 	{
-	    MXS_ERROR("%s: Error: Service is missing user credentials."
-                      " Add the missing username or passwd parameter to the service.",
-                      service->name);
+	    skygw_log_write(LE,"%s: Error: Service is missing user credentials."
+		    " Add the missing username or passwd parameter to the service.",
+			    service->name);
 	    return NULL;
 	}
 
 	if(options == NULL || options[0] == NULL)
 	{
-	    MXS_ERROR("%s: Error: No router options supplied for binlogrouter",
-                      service->name);
-	    return NULL;
-	}
-
-	/* Check for listeners associated to this service */
-	if (service->ports == NULL)
-	{
-	    MXS_ERROR("%s: Error: No listener configured for binlogrouter. Add a listener section in config file.",
-                      service->name);
+	    skygw_log_write(LE,
+		     "%s: Error: No router options supplied for binlogrouter",
+		     service->name);
 	    return NULL;
 	}
 
@@ -226,25 +219,24 @@ char	*defuuid;
 	 * We only support one server behind this router, since the server is
 	 * the master from which we replicate binlog records. Therefore check
 	 * that only one server has been defined.
+	 *
+	 * A later improvement will be to define multiple servers and have the
+	 * router use the information that is supplied by the monitor to find
+	 * which of these servers is currently the master and replicate from
+	 * that server.
 	 */
-	if (service->dbref != NULL)
+	if (service->dbref == NULL || service->dbref->next != NULL)
 	{
-		MXS_WARNING("%s: backend database server is provided by master.ini file "
-			    "for use with the binlog router."
-			    " Server section is no longer required.",
-			    service->name);
-
-		server_free(service->dbref->server);
-		free(service->dbref);
-		service->dbref = NULL;
+		skygw_log_write(LE,
+			"%s: Error : Exactly one database server may be "
+			"for use with the binlog router.",
+			service->name);
+		return NULL;
 	}
 
 	if ((inst = calloc(1, sizeof(ROUTER_INSTANCE))) == NULL) {
-		MXS_ERROR("%s: Error: failed to allocate memory for router instance.",
-                          service->name);
-
-		return NULL;
-	}
+                return NULL;
+        }
 
 	memset(&inst->stats, 0, sizeof(ROUTER_STATS));
 	memset(&inst->saved_master, 0, sizeof(MASTER_RESPONSES));
@@ -297,16 +289,11 @@ char	*defuuid;
 	{
 		my_uuid(defuuid);
 		if ((inst->uuid = (char *)malloc(38)) != NULL)
-			sprintf(inst->uuid,
-			        "%02hhx%02hhx%02hhx%02hhx-"
-			        "%02hhx%02hhx-"
-			        "%02hhx%02hhx-"
-			        "%02hhx%02hhx-"
-			        "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx",
-			        defuuid[0], defuuid[1], defuuid[2], defuuid[3],
-			        defuuid[4], defuuid[5], defuuid[6], defuuid[7],
-			        defuuid[8], defuuid[9], defuuid[10], defuuid[11],
-			        defuuid[12], defuuid[13], defuuid[14], defuuid[15]);
+			sprintf(inst->uuid, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+			defuuid[0], defuuid[1], defuuid[2], defuuid[3],
+			defuuid[4], defuuid[5], defuuid[6], defuuid[7],
+			defuuid[8], defuuid[9], defuuid[10], defuuid[11],
+			defuuid[12], defuuid[13], defuuid[14], defuuid[15]);
 	}
 
 	/*
@@ -485,8 +472,9 @@ char	*defuuid;
 	}
 	else
 	{
-		MXS_ERROR("%s: Error: No router options supplied for binlogrouter",
-                          service->name);
+		LOGIF(LE, (skygw_log_write(
+			LOGFILE_ERROR, "%s: Error: No router options supplied for binlogrouter",
+				service->name)));
 	}
 
 	if (inst->fileroot == NULL)
