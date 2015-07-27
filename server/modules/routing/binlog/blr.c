@@ -839,12 +839,16 @@ ROUTER_SLAVE	 *slave = (ROUTER_SLAVE *)router_session;
 		/*
 		 * We must be closing the master session.
 		 */
-		MXS_NOTICE("%s: Master %s disconnected after %ld seconds. "
-                           "%lu events read,",
-                           router->service->name, router->service->dbref->server->name,
-                           time(0) - router->connect_time, router->stats.n_binlogs_ses);
-        	MXS_ERROR("Binlog router close session with master server %s",
-                          router->service->dbref->server->unique_name);
+		LOGIF(LM, (skygw_log_write_flush(
+			LOGFILE_MESSAGE,
+			"%s: Master %s disconnected after %ld seconds. "
+			"%d events read,",
+			router->service->name, router->service->dbref->server->name,
+			time(0) - router->connect_time, router->stats.n_binlogs_ses)));
+        	LOGIF(LE, (skygw_log_write_flush(
+			LOGFILE_ERROR,
+			"Binlog router close session with master server %s",
+			router->service->dbref->server->unique_name)));
 		blr_master_reconnect(router);
 		return;
 	}
@@ -1388,11 +1392,12 @@ char		msg[85], *errmsg;
 	if (errmsg)
 		free(errmsg);
 	*succp = true;
-        dcb_close(backend_dcb);
-	MXS_NOTICE("%s: Master %s disconnected after %ld seconds. "
-                   "%lu events read.",
-                   router->service->name, router->service->dbref->server->name,
-                   time(0) - router->connect_time, router->stats.n_binlogs_ses);
+	LOGIF(LM, (skygw_log_write_flush(
+		LOGFILE_MESSAGE,
+		"%s: Master %s disconnected after %ld seconds. "
+		"%d events read.",
+		router->service->name, router->service->dbref->server->name,
+		time(0) - router->connect_time, router->stats.n_binlogs_ses)));
 	blr_master_reconnect(router);
 }
 
