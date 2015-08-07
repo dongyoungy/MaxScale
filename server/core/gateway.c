@@ -1813,14 +1813,12 @@ int main(int argc, char **argv)
 
     if (mkdir(datadir, 0777) != 0){
 
-        if (errno != EEXIST){
-            char errbuf[STRERROR_BUFLEN];
-            fprintf(stderr,
-                    "Error: Cannot create data directory '%s': %d %s\n",
-                    datadir, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
-            goto return_main;
-        }
-    }
+			if(errno != EEXIST){
+				fprintf(stderr,
+						"Error: Cannot create data directory '%s': %d %s\n",datadir,errno,strerror(errno));
+				goto return_main;
+			}
+		}
 
     if (!daemon_mode)
     {
@@ -1843,23 +1841,12 @@ int main(int argc, char **argv)
     MXS_NOTICE("Module directory: %s", get_libdir());
     MXS_NOTICE("Service cache: %s", get_cachedir());
 
-    /*< Update the server options */
-    for (i = 0; server_options[i]; i++)
-    {
-        if (!strcmp(server_options[i], "--datadir="))
-        {
-            snprintf(datadir_arg, 10+PATH_MAX+1, "--datadir=%s", datadir);
-            server_options[i] = datadir_arg;
-        }
-        else if (!strcmp(server_options[i], "--language="))
-        {
-            snprintf(language_arg,
-                     11+PATH_MAX+1,
-                     "--language=%s",
-                     get_langdir());
-            server_options[i] = language_arg;
-        }
-    }
+			if(errno != EEXIST){
+				fprintf(stderr,
+						"Error: Cannot create data directory '%s': %d %s\n",datadir,errno,strerror(errno));
+				goto return_main;
+			}
+		}
 
     if (mysql_library_init(num_elements, server_options, server_groups))
     {

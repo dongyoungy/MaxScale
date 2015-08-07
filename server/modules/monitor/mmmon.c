@@ -116,17 +116,15 @@ startMonitor(void *arg, void* opt)
     }
     else
     {
-        if ((handle = (MM_MONITOR *) malloc(sizeof(MM_MONITOR))) == NULL)
-        {
-            return NULL;
-        }
-        handle->shutdown = 0;
-        handle->id = MONITOR_DEFAULT_ID;
-        handle->master = NULL;
-        handle->script = NULL;
-        handle->detectStaleMaster = false;
-        memset(handle->events, false, sizeof(handle->events));
-        spinlock_init(&handle->lock);
+	if ((handle = (MM_MONITOR *)malloc(sizeof(MM_MONITOR))) == NULL)
+	    return NULL;
+	handle->shutdown = 0;
+	handle->id = MONITOR_DEFAULT_ID;
+	handle->master = NULL;
+	handle->script = NULL;
+	handle->detectStaleMaster = false;
+	memset(handle->events,false,sizeof(handle->events));
+	spinlock_init(&handle->lock);
     }
 
     while (params)
@@ -186,7 +184,7 @@ static void
 stopMonitor(void *arg)
 {
     MONITOR* mon = arg;
-    MM_MONITOR *handle = (MM_MONITOR *) mon->handle;
+    MM_MONITOR	*handle = (MM_MONITOR *)mon->handle;
 
     handle->shutdown = 1;
     thread_wait((void *) handle->tid);
@@ -530,103 +528,49 @@ monitorDatabase(MONITOR* mon, MONITOR_SERVERS *database)
 static void
 monitorMain(void *arg)
 {
-    MONITOR* mon = (MONITOR*) arg;
-    MM_MONITOR *handle;
-    MONITOR_SERVERS *ptr;
-    int detect_stale_master = false;
-    MONITOR_SERVERS *root_master = NULL;
-    size_t nrounds = 0;
+    MONITOR* mon = (MONITOR*)arg;
+MM_MONITOR	*handle;
+MONITOR_SERVERS	*ptr;
+int detect_stale_master = false;
+MONITOR_SERVERS *root_master = NULL;
+size_t nrounds = 0;
 
-    spinlock_acquire(&mon->lock);
-    handle = (MM_MONITOR *) mon->handle;
-    spinlock_release(&mon->lock);
-    detect_stale_master = handle->detectStaleMaster;
+spinlock_acquire(&mon->lock);
+handle = (MM_MONITOR *)mon->handle;
+spinlock_release(&mon->lock);
+detect_stale_master = handle->detectStaleMaster;
 
-    if (mysql_thread_init())
-    {
-        MXS_ERROR("Fatal : mysql_thread_init failed in monitor "
-                  "module. Exiting.");
-        return;
-    }
+	if (mysql_thread_init())
+	{
+		LOGIF(LE, (skygw_log_write_flush(
+                                   LOGFILE_ERROR,
+                                   "Fatal : mysql_thread_init failed in monitor "
+                                   "module. Exiting.\n")));
+		return;
+	}                         
 
-    handle->status = MONITOR_RUNNING;
-    while (1)
-    {
-        if (handle->shutdown)
-        {
-            handle->status = MONITOR_STOPPING;
-            mysql_thread_end();
-            handle->status = MONITOR_STOPPED;
-            return;
-        }
+	handle->status = MONITOR_RUNNING;
+	while (1)
+	{
+		if (handle->shutdown)
+		{
+			handle->status = MONITOR_STOPPING;
+			mysql_thread_end();
+			handle->status = MONITOR_STOPPED;
+			return;
+		}
 
-        /** Wait base interval */
-        thread_millisleep(MON_BASE_INTERVAL_MS);
-        /**
-         * Calculate how far away the monitor interval is from its full
-         * cycle and if monitor interval time further than the base
-         * interval, then skip monitoring checks. Excluding the first
-         * round.
-         */
-        if (nrounds != 0 &&
-            ((nrounds * MON_BASE_INTERVAL_MS) % mon->interval) >=
-            MON_BASE_INTERVAL_MS)
-        {
-            nrounds += 1;
-            continue;
-        }
-        nrounds += 1;
-
-        /* start from the first server in the list */
-        ptr = mon->databases;
-
-        while (ptr)
-        {
-            /* copy server status into monitor pending_status */
-            ptr->pending_status = ptr->server->status;
-
-            /* monitor current node */
-            monitorDatabase(mon, ptr);
-
-            if (mon_status_changed(ptr))
-            {
-                dcb_hangup_foreach(ptr->server);
-            }
-
-            if (mon_status_changed(ptr) ||
-                mon_print_fail_status(ptr))
-            {
-                MXS_DEBUG("Backend server %s:%d state : %s",
-                          ptr->server->name,
-                          ptr->server->port,
-                          STRSRVSTATUS(ptr->server));
-            }
-            if (SERVER_IS_DOWN(ptr->server))
-            {
-                /** Increase this server'e error count */
-                ptr->mon_err_count += 1;
-            }
-            else
-            {
-                /** Reset this server's error count */
-                ptr->mon_err_count = 0;
-            }
-
-            ptr = ptr->next;
-        }
-
-        /* Get Master server pointer */
-        root_master = get_current_master(mon);
-
-        /* Update server status from monitor pending status on that server*/
-
-        ptr = mon->databases;
-        while (ptr)
-        {
-            if (!SERVER_IN_MAINT(ptr->server))
-            {
-                /* If "detect_stale_master" option is On, let's use the previus master */
-                if (detect_stale_master && root_master && (!strcmp(ptr->server->name, root_master->server->name) && ptr->server->port == root_master->server->port) && (ptr->server->status & SERVER_MASTER) && !(ptr->pending_status & SERVER_MASTER))
+		/** Wait base interval */
+		thread_millisleep(MON_BASE_INTERVAL_MS);
+		/**
+		 * Calculate how far away the monitor interval is from its full
+		 * cycle and if monitor interval time further than the base
+		 * interval, then skip monitoring checks. Excluding the first
+		 * round.
+		 */
+                if (nrounds != 0 &&
+                        ((nrounds*MON_BASE_INTERVAL_MS)%mon->interval) >=
+                        MON_BASE_INTERVAL_MS)
                 {
                     /* in this case server->status will not be updated from pending_status */
                     MXS_NOTICE("[mysql_mon]: root server [%s:%i] is no longer Master, let's "
