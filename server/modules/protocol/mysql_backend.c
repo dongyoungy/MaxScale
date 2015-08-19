@@ -1519,6 +1519,8 @@ static GWBUF* process_response_data (
                                 * enough data to read the packet length.
                                 */
                                 init_response_status(readbuf, srvcmd, &npackets_left, &nbytes_left);
+				initial_packets = npackets_left;
+				initial_bytes = nbytes_left;
                         }
 
 			initial_packets = npackets_left;
@@ -1601,11 +1603,9 @@ static GWBUF* process_response_data (
 				 wait for more data from the backend server.*/
 				if(readbuf == NULL || GWBUF_LENGTH(readbuf) < 3)
 				{
-				    MXS_DEBUG("%lu [%s] Read %d packets. Waiting for %d more "
-                                              "packets for a total of %d packets.",
-                                              pthread_self(),__FUNCTION__,
-                                              initial_packets - npackets_left,
-                                              npackets_left,initial_packets);
+				    skygw_log_write(LD," %lu [%s] Read %d packets. Waiting for %d more packets for a total of %d packets.",
+					     pthread_self(),__FUNCTION__,initial_packets - npackets_left,
+					     npackets_left,initial_packets);
 
 				    /** Store the already read data into the readqueue of the DCB
 				     * and restore the response status to the initial number of packets */
