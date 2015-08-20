@@ -277,156 +277,169 @@ diagnostics(DCB *dcb, void *arg)
 static void
 monitorDatabase(MONITOR *mon, MONITOR_SERVERS *database)
 {
-    GALERA_MONITOR* handle = (GALERA_MONITOR*) mon->handle;
-    MYSQL_ROW row;
-    MYSQL_RES *result, *result2;
-    int isjoined = 0;
-    unsigned long int server_version = 0;
-    char *server_string;
-    SERVER temp_server;
+    GALERA_MONITOR* handle = (GALERA_MONITOR*)mon->handle;
+MYSQL_ROW	row;
+MYSQL_RES	*result,*result2;
+int		isjoined = 0;
+char		*uname  = mon->user;
+char		*passwd = mon->password;
+unsigned long int	server_version = 0;
+char 			*server_string;
 
-    /* Don't even probe server flagged as in maintenance */
-    if (SERVER_IN_MAINT(database->server))
-        return;
+	if (database->server->monuser != NULL)
+	{
+		uname = database->server->monuser;
+		passwd = database->server->monpw;
+	}
+	if (uname == NULL)
+		return;
 
-    /** Store previous status */
-    database->mon_prev_status = database->server->status;
+	/* Don't even probe server flagged as in maintenance */
+	if (SERVER_IN_MAINT(database->server))
+		return;
 
-    server_transfer_status(&temp_server, database->server);
-    server_clear_status(&temp_server, SERVER_RUNNING);
-    /* Also clear Joined */
-    server_clear_status(&temp_server, SERVER_JOINED);
+	/** Store previous status */
+	database->mon_prev_status = database->server->status;
 
-    connect_result_t rval = mon_connect_to_db(mon, database);
-    if (rval != MONITOR_CONN_OK)
-    {
-        if (mysql_errno(database->con) == ER_ACCESS_DENIED_ERROR)
-        {
-            server_set_status(&temp_server, SERVER_AUTH_ERROR);
-        }
-        else
-        {
-            server_clear_status(&temp_server, SERVER_AUTH_ERROR);
-        }
+	if (database->con == NULL || mysql_ping(database->con) != 0)
+	{
+		char *dpwd = decryptPassword(passwd);
+		int connect_timeout = mon->connect_timeout;
+		int read_timeout = mon->read_timeout;
+		int write_timeout = mon->write_timeout;
 
-        database->server->node_id = -1;
+		if(database->con)
+		    mysql_close(database->con);
+		database->con = mysql_init(NULL);
 
-        if (mon_status_changed(database) && mon_print_fail_status(database))
-        {
-            mon_log_connect_error(database, rval);
-        }
+		mysql_options(database->con, MYSQL_OPT_CONNECT_TIMEOUT, (void *)&connect_timeout);
+		mysql_options(database->con, MYSQL_OPT_READ_TIMEOUT, (void *)&read_timeout);
+		mysql_options(database->con, MYSQL_OPT_WRITE_TIMEOUT, (void *)&write_timeout);
 
-        server_transfer_status(database->server, &temp_server);
+		if (mysql_real_connect(database->con, database->server->name,
+			uname, dpwd, NULL, database->server->port, NULL, 0) == NULL)
+		{
+			free(dpwd);
 
-        return;
-    }
+			server_clear_status(database->server, SERVER_RUNNING);
 
-    /* If we get this far then we have a working connection */
-    server_set_status(&temp_server, SERVER_RUNNING);
+			/* Also clear Joined, M/S and Stickiness bits */
+			server_clear_status(database->server, SERVER_JOINED);
+			server_clear_status(database->server, SERVER_SLAVE);
+			server_clear_status(database->server, SERVER_MASTER);
+			server_clear_status(database->server, SERVER_MASTER_STICKINESS);
 
-    /* get server version string */
-    server_string = (char *) mysql_get_server_info(database->con);
-    if (server_string)
-    {
-        server_set_version_string(database->server, server_string);
-    }
+			if (mysql_errno(database->con) == ER_ACCESS_DENIED_ERROR)
+			{
+				server_set_status(database->server, SERVER_AUTH_ERROR);
+			}
 
-    /* Check if the the Galera FSM shows this node is joined to the cluster */
-    if (mysql_query(database->con, "SHOW STATUS LIKE 'wsrep_local_state'") == 0
-        && (result = mysql_store_result(database->con)) != NULL)
-    {
-        if (mysql_field_count(database->con) < 2)
-        {
-            mysql_free_result(result);
-            MXS_ERROR("Unexpected result for \"SHOW STATUS LIKE 'wsrep_local_state'\". "
-                      "Expected 2 columns."
-                      " MySQL Version: %s", version_str);
-            return;
-        }
+			database->server->node_id = -1;
 
-        while ((row = mysql_fetch_row(result)))
-        {
-            if (strcmp(row[1], "4") == 0)
-                isjoined = 1;
+			if (mon_status_changed(database) && mon_print_fail_status(database))
+			{
+				LOGIF(LE, (skygw_log_write_flush(
+					LOGFILE_ERROR,
+					"Error : Monitor was unable to connect to "
+					"server %s:%d : \"%s\"",
+					database->server->name,
+					database->server->port,
+					mysql_error(database->con))));
+			}
 
-                /* Check if the node is a donor and is using xtrabackup, in this case it can stay alive */
-            else if (strcmp(row[1], "2") == 0 && handle->availableWhenDonor == 1)
-            {
-                if (mysql_query(database->con, "SHOW VARIABLES LIKE 'wsrep_sst_method'") == 0
-                    && (result2 = mysql_store_result(database->con)) != NULL)
-                {
-                    if (mysql_field_count(database->con) < 2)
-                    {
-                        mysql_free_result(result);
-                        mysql_free_result(result2);
-                        MXS_ERROR("Unexpected result for \"SHOW VARIABLES LIKE "
-                                  "'wsrep_sst_method'\". Expected 2 columns."
-                                  " MySQL Version: %s", version_str);
-                        return;
-                    }
-                    while ((row = mysql_fetch_row(result2)))
-                    {
-                        if (strncmp(row[1], "xtrabackup", 10) == 0)
-                            isjoined = 1;
-                    }
-                    mysql_free_result(result2);
-                }
-            }
-        }
-        mysql_free_result(result);
-    }
+			return;
+		}
+		else
+		{
+			server_clear_status(database->server, SERVER_AUTH_ERROR);
+		}
+		free(dpwd);
+	}
 
-    /* Check the the Galera node index in the cluster */
-    if (mysql_query(database->con, "SHOW STATUS LIKE 'wsrep_local_index'") == 0
-        && (result = mysql_store_result(database->con)) != NULL)
-    {
-        long local_index = -1;
+	/* If we get this far then we have a working connection */
+	server_set_status(database->server, SERVER_RUNNING);
 
-        if (mysql_field_count(database->con) < 2)
-        {
-            mysql_free_result(result);
-            MXS_ERROR("Unexpected result for \"SHOW STATUS LIKE 'wsrep_local_index'\". "
-                      "Expected 2 columns."
-                      " MySQL Version: %s", version_str);
-            return;
-        }
+	/* get server version string */
+	server_string = (char *)mysql_get_server_info(database->con);
+	if (server_string) {
+		database->server->server_string = realloc(database->server->server_string, strlen(server_string)+1);
+		if (database->server->server_string)
+			strcpy(database->server->server_string, server_string);
+	}	
 
-        while ((row = mysql_fetch_row(result)))
-        {
-            local_index = strtol(row[1], NULL, 10);
-            if ((errno == ERANGE && (local_index == LONG_MAX
-                                     || local_index == LONG_MIN)) || (errno != 0 && local_index == 0))
-            {
-                local_index = -1;
-            }
-            database->server->node_id = local_index;
-        }
-        mysql_free_result(result);
-    }
+	/* Check if the the Galera FSM shows this node is joined to the cluster */
+	if (mysql_query(database->con, "SHOW STATUS LIKE 'wsrep_local_state'") == 0
+		&& (result = mysql_store_result(database->con)) != NULL)
+	{
+		if(mysql_field_count(database->con) < 2)
+		{
+		    mysql_free_result(result);
+		    skygw_log_write(LE,"Error: Unexpected result for \"SHOW STATUS LIKE 'wsrep_local_state'\". Expected 2 columns."
+				    " MySQL Version: %s",version_str);
+		    return;
+		}
 
-    if (isjoined)
-    {
-        server_set_status(&temp_server, SERVER_JOINED);
-    }
-    else
-    {
-        server_clear_status(&temp_server, SERVER_JOINED);
-    }
+		while ((row = mysql_fetch_row(result)))
+		{
+			if (strcmp(row[1], "4") == 0) 
+				isjoined = 1;
+	
+			/* Check if the node is a donor and is using xtrabackup, in this case it can stay alive */
+			else if (strcmp(row[1], "2") == 0 && handle->availableWhenDonor == 1) {
+				if (mysql_query(database->con, "SHOW VARIABLES LIKE 'wsrep_sst_method'") == 0
+					&& (result2 = mysql_store_result(database->con)) != NULL)
+				{
+				    		if(mysql_field_count(database->con) < 2)
+						{
+						    mysql_free_result(result);
+						    mysql_free_result(result2);
+						    skygw_log_write(LE,"Error: Unexpected result for \"SHOW VARIABLES LIKE 'wsrep_sst_method'\". Expected 2 columns."
+							    " MySQL Version: %s",version_str);
+						    return;
+						}
+					while ((row = mysql_fetch_row(result2)))
+					{
+						if (strncmp(row[1], "xtrabackup", 10) == 0)
+							isjoined = 1;
+					}
+					mysql_free_result(result2);
+				}
+			}
+		}
+		mysql_free_result(result);
+	}
 
-    /* clear bits for non member nodes */
-    if (!SERVER_IN_MAINT(database->server) && (!SERVER_IS_JOINED(&temp_server)))
-    {
-        database->server->depth = -1;
+	/* Check the the Galera node index in the cluster */
+	if (mysql_query(database->con, "SHOW STATUS LIKE 'wsrep_local_index'") == 0
+		&& (result = mysql_store_result(database->con)) != NULL)
+	{
+		long local_index = -1;
 
-        /* clear M/S status */
-        server_clear_status(&temp_server, SERVER_SLAVE);
-        server_clear_status(&temp_server, SERVER_MASTER);
+		if(mysql_field_count(database->con) < 2)
+		{
+		    mysql_free_result(result);
+		    skygw_log_write(LE,"Error: Unexpected result for \"SHOW STATUS LIKE 'wsrep_local_index'\". Expected 2 columns."
+							    " MySQL Version: %s",version_str);
+		    return;
+		}
 
-        /* clear master sticky status */
-        server_clear_status(&temp_server, SERVER_MASTER_STICKINESS);
-    }
+		while ((row = mysql_fetch_row(result)))
+		{
+			local_index = strtol(row[1], NULL, 10);
+			if ((errno == ERANGE && (local_index == LONG_MAX
+				|| local_index == LONG_MIN)) || (errno != 0 && local_index == 0))
+			{
+				local_index = -1;
+			}
+			database->server->node_id = local_index;
+		}
+		mysql_free_result(result);
+	}
 
-    server_transfer_status(database->server, &temp_server);
+	if (isjoined)
+		server_set_status(database->server, SERVER_JOINED);
+	else
+		server_clear_status(database->server, SERVER_JOINED);
 }
 
 /**
