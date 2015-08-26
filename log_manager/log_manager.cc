@@ -2304,12 +2304,53 @@ static void* thr_filewriter_fun(void* data)
             skygw_message_send(fwr->fwr_clientmes);
         }
 
-    } /* while (!skygw_thread_must_exit) */
+                                }
+                                /** Release lock to block buffer */
+                                simple_mutex_unlock(&bb->bb_mutex);
+                    
+                                /** Consistent lock-free read on the list */
+                                do {
+                                        while ((vn1 = bb_list->mlist_versno)%2
+                                               != 0);
+                                        node = node->mlnode_next;
+                                        vn2 = bb_list->mlist_versno;
+                                } while (vn1 != vn2 && node);
+                    
+                        } /* while (node != NULL) */
 
-    ss_debug(skygw_thread_set_state(thr, THR_STOPPED));
-    /** Inform log manager that file writer thread has stopped. */
-    skygw_message_send(fwr->fwr_clientmes);
-    return NULL;
+                        /**
+                         * Writer's exit flag was set after checking it.
+                         * Loop is restarted to ensure that all logfiles are
+                         * flushed.
+                         */
+
+						if(flushall_started_flag){
+							flushall_started_flag = false;
+							flushall_done_flag = true;
+							i = LOGFILE_FIRST;
+							    goto retry_flush_on_exit;
+						}
+
+                        if (!thr_flushall_check() && skygw_thread_must_exit(thr))
+                        {
+							    flushall_logfiles(true);
+                                i = LOGFILE_FIRST;
+                                goto retry_flush_on_exit;
+                        }
+                }/* for */
+				
+				if(flushall_done_flag){
+					flushall_done_flag = false;
+					flushall_logfiles(false);
+					skygw_message_send(fwr->fwr_clientmes);
+				}
+				
+        } /* while (!skygw_thread_must_exit) */
+        
+        ss_debug(skygw_thread_set_state(thr, THR_STOPPED));
+        /** Inform log manager that file writer thread has stopped. */
+        skygw_message_send(fwr->fwr_clientmes);
+        return NULL;
 }
 
 
