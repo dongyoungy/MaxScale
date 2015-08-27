@@ -380,47 +380,46 @@ static int signal_set(int sig, void (*handler)(int));
 static void
 sigfatal_handler(int i)
 {
-    if (fatal_handling)
-    {
-        fprintf(stderr, "Fatal signal %d while backtracing\n", i);
-        _exit(1);
-    }
-    fatal_handling = 1;
-    GATEWAY_CONF* cnf = config_get_global_options();
-    fprintf(stderr, "\n\nMaxScale "MAXSCALE_VERSION" received fatal signal %d\n", i);
+	if (fatal_handling) {
+		fprintf(stderr, "Fatal signal %d while backtracing\n", i);
+		_exit(1);
+	}
+	fatal_handling = 1;
+        GATEWAY_CONF* cnf = config_get_global_options();
+	fprintf(stderr, "\n\nMaxScale "MAXSCALE_VERSION" received fatal signal %d\n", i);
 
-    MXS_ERROR("Fatal: MaxScale "MAXSCALE_VERSION" received fatal signal %d. Attempting backtrace.", i);
+	LOGIF(LE, (skygw_log_write_flush(
+                LOGFILE_ERROR,
+                "Fatal: MaxScale "MAXSCALE_VERSION" received fatal signal %d. Attempting backtrace.", i)));
 
-    MXS_ERROR("Commit ID: %s System name: %s "
-              "Release string: %s Embedded library version: %s",
-              maxscale_commit, cnf->sysname, cnf->release_string, cnf->version_string);
+        skygw_log_write_flush(LE,"Commit ID: "MAXSCALE_COMMIT" System name: %s "
+                "Release string: %s Embedded library version: %s",
+                cnf->sysname,cnf->release_string,cnf->version_string);
 
-    {
-        void *addrs[128];
-        int n, count = backtrace(addrs, 128);
-        char** symbols = backtrace_symbols(addrs, count);
+	{
+		void *addrs[128];
+		int n, count = backtrace(addrs, 128);
+		char** symbols = backtrace_symbols( addrs, count );
 
-        if (symbols)
-        {
-            for (n = 0; n < count; n++)
-            {
-                MXS_ERROR("  %s\n", symbols[n]);
-            }
-            free(symbols);
-        }
-        else
-        {
-            fprintf(stderr, "\nresolving symbols to error log failed, writing call trace to stderr:\n");
-            backtrace_symbols_fd(addrs, count, fileno(stderr));
-        }
-    }
+		if (symbols) {
+			for( n = 0; n < count; n++ ) {
+				LOGIF(LE, (skygw_log_write_flush(
+					LOGFILE_ERROR,
+					"  %s\n", symbols[n])));
+			}
+			free(symbols);
+		} else {
+			fprintf(stderr, "\nresolving symbols to error log failed, writing call trace to stderr:\n");
+			backtrace_symbols_fd(addrs, count, fileno(stderr));
+		}
+	}
 
-    mxs_log_flush_sync();
+	skygw_log_sync_all();
 
-    /* re-raise signal to enforce core dump */
-    fprintf(stderr, "\n\nWriting core dump\n");
-    signal_set(i, SIG_DFL);
-    raise(i);
+	/* re-raise signal to enforce core dump */
+	fprintf(stderr, "\n\nWriting core dump\n");
+	signal_set(i, SIG_DFL);
+	raise(i);
 }
 
 
@@ -1082,23 +1081,105 @@ int main(int argc, char **argv)
         }
     }
 
-    while ((opt = getopt_long(argc, argv, "dc:f:l:vVs:S:?L:D:C:B:U:A:P:G:",
-                              long_options, &option_index)) != -1)
-    {
-        bool succp = true;
+        while ((opt = getopt_long(argc, argv, "dc:f:l:vs:S:?L:D:C:B:U:A:P:",
+				 long_options, &option_index)) != -1)
+        {
+                bool succp = true;
 
-        switch (opt) {
-        case 'd':
-            /*< Debug mode, maxscale runs in this same process */
-            daemon_mode = false;
-            break;
+                switch (opt) {
+                case 'd':
+                        /*< Debug mode, maxscale runs in this same process */
+                        daemon_mode = false;
+                        break;
 
-        case 'f':
-            /*<
-             * Simply copy the conf file argument. Expand or validate
-             * it when MaxScale home directory is resolved.
-             */
-            if (optarg[0] != '-')
+                case 'f':
+                        /*<
+                         * Simply copy the conf file argument. Expand or validate
+                         * it when MaxScale home directory is resolved.
+                         */
+                        if (optarg[0] != '-')
+                        {
+                                cnf_file_arg = strndup(optarg, PATH_MAX);
+                        }
+                        if (cnf_file_arg == NULL)
+                        {
+                                char* logerr = "Configuration file argument "
+                                        "identifier \'-f\' was specified but "
+                                        "the argument didn't specify\n  a valid "
+                                        "configuration file or the argument "
+                                        "was missing.";
+                                print_log_n_stderr(true, true, logerr, logerr, 0);
+                                usage();
+                                succp = false;
+                        }
+                        break;  
+			
+		case 'v':
+		  rc = EXIT_SUCCESS;
+                  printf("MaxScale %s\n",MAXSCALE_VERSION);
+                  goto return_main;		  
+
+		case 'l':
+			if (strncasecmp(optarg, "file", PATH_MAX) == 0)
+				logtofile = 1;
+			else if (strncasecmp(optarg, "shm", PATH_MAX) == 0)
+				logtofile = 0;
+			else
+			{
+                                char* logerr = "Configuration file argument "
+                                        "identifier \'-l\' was specified but "
+                                        "the argument didn't specify\n  a valid "
+                                        "configuration file or the argument "
+                                        "was missing.";
+                                print_log_n_stderr(true, true, logerr, logerr, 0);
+                                usage();
+                                succp = false;
+			}
+			break;
+		case 'L':
+	
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,false))
+		    {
+			logdir = tmp_path;
+		    }
+
+		    break;
+		case 'N':
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,false))
+		    {
+			langdir = tmp_path;
+		    }
+		    break;
+		case 'P':
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,true))
+		    {
+			piddir = tmp_path;
+		    }
+		    break;
+		case 'D':
+		    sprintf(datadir,"%s",optarg);
+		    maxscaledatadir = strdup(optarg);
+		    datadir_defined = true;
+		    break;
+		case 'C':
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,false))
+		    {
+			configdir = tmp_path;
+		    }
+		    break;
+		case 'B':
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,false))
+		    {
+			libdir = tmp_path;
+		    }
+		    break;
+		case 'A':
+		    if(handle_path_arg(&tmp_path,optarg,NULL,true,true))
+		    {
+			cachedir = tmp_path;
+		    }
+		    break;
+		case 'S':
             {
                 cnf_file_arg = strndup(optarg, PATH_MAX);
             }
