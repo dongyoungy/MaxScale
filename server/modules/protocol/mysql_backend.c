@@ -533,11 +533,13 @@ static int gw_read_backend_event(DCB *dcb) {
 			}
 
 			if (!read_buffer) {
-                            MXS_NOTICE("%lu [gw_read_backend_event] "
-                                       "Read buffer unexpectedly null, even though response "
-                                       "not marked as complete. User: %s",
-                                       pthread_self(),
-                                       current_session->user);
+                                LOGIF(LM, (skygw_log_write_flush(
+					LOGFILE_MESSAGE,
+                                        "%lu [gw_read_backend_event] "
+					"Read buffer unexpectedly null, even though response "
+					"not marked as complete. User: %s",
+                                        pthread_self(),
+                                        current_session->user)));
 				rc = 0;
 				goto return_rc;
 			}
@@ -1519,8 +1521,6 @@ static GWBUF* process_response_data (
                                 * enough data to read the packet length.
                                 */
                                 init_response_status(readbuf, srvcmd, &npackets_left, &nbytes_left);
-				initial_packets = npackets_left;
-				initial_bytes = nbytes_left;
                         }
 
 			initial_packets = npackets_left;
