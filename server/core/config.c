@@ -73,10 +73,14 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <pcre.h>
 #include <dbusers.h>
-#include <gw.h>
-#define PCRE2_CODE_UNIT_WIDTH 8
-#include <pcre2.h>
+
+
+/** Defined in log_manager.cc */
+extern int            lm_enabled_logfiles_bitmask;
+extern size_t         log_ses_count[];
+extern __thread log_info_t tls_log_info;
 
 extern int setipaddress(struct in_addr *, char *);
 static int process_config_context(CONFIG_CONTEXT   *);
@@ -1659,22 +1663,49 @@ handle_global_item(const char *name, const char *value)
         {
             MXS_ERROR("Invalid timeout value for 'auth_write_timeout': %s", value);
         }
-    }
-    else
-    {
-        for (i = 0; lognames[i].name; i++)
-        {
-            if (strcasecmp(name, lognames[i].name) == 0)
-            {
-                if (lognames[i].replacement)
-                {
-                    MXS_WARNING("In the configuration file the use of '%s' is deprecated, "
-                                "use '%s' instead.",
-                                lognames[i].name, lognames[i].replacement);
-                }
-
-                mxs_log_set_priority_enabled(lognames[i].priority, config_truth_value((char*)value));
-            }
+	else if (strcmp(name, "ms_timestamp") == 0)
+	{
+		skygw_set_highp(config_truth_value((char*)value));
+	}
+    else if (strcmp(name, "auth_connect_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_conn_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_connect_timeout': %s", value);
+	}
+    else if (strcmp(name, "auth_read_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_read_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_read_timeout': %s", value);
+	}
+    else if (strcmp(name, "auth_write_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_write_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_write_timeout': %s", value);
+	}
+	else
+	{
+		for (i = 0; lognames[i].logname; i++)
+		{
+			if (strcasecmp(name, lognames[i].logname) == 0)
+			{
+				if (config_truth_value((char*)value))
+					skygw_log_enable(lognames[i].logfile);
+				else
+					skygw_log_disable(lognames[i].logfile);
+			}
+		}
         }
     }
     return 1;
@@ -1724,50 +1755,37 @@ handle_feedback_item(const char *name, const char *value)
 static void
 global_defaults()
 {
-    uint8_t mac_addr[6]="";
-    struct utsname uname_data;
-    gateway.n_threads = get_processor_count();
-    gateway.n_nbpoll = DEFAULT_NBPOLLS;
-    gateway.pollsleep = DEFAULT_POLLSLEEP;
+	uint8_t mac_addr[6]="";
+	struct utsname uname_data;
+	gateway.n_threads = 1;
+	gateway.n_nbpoll = DEFAULT_NBPOLLS;
+	gateway.pollsleep = DEFAULT_POLLSLEEP;
     gateway.auth_conn_timeout = DEFAULT_AUTH_CONNECT_TIMEOUT;
     gateway.auth_read_timeout = DEFAULT_AUTH_READ_TIMEOUT;
     gateway.auth_write_timeout = DEFAULT_AUTH_WRITE_TIMEOUT;
-    if (version_string != NULL)
-    {
-        gateway.version_string = strdup(version_string);
-    }
-    else
-    {
-        gateway.version_string = NULL;
-    }
-    gateway.id=0;
+	if (version_string != NULL)
+		gateway.version_string = strdup(version_string);
+	else
+		gateway.version_string = NULL;
+	gateway.id=0;
 
-    /* get release string */
-    if (!config_get_release_string(gateway.release_string))
-    {
-        sprintf(gateway.release_string, "undefined");
-    }
+	/* get release string */
+	if(!config_get_release_string(gateway.release_string))
+	    sprintf(gateway.release_string,"undefined");
 
-    /* get first mac_address in SHA1 */
-    if (config_get_ifaddr(mac_addr))
-    {
-        gw_sha1_str(mac_addr, 6, gateway.mac_sha1);
-    }
-    else
-    {
-        memset(gateway.mac_sha1, '\0', sizeof(gateway.mac_sha1));
-        memcpy(gateway.mac_sha1, "MAC-undef", 9);
-    }
+	/* get first mac_address in SHA1 */
+	if(config_get_ifaddr(mac_addr)) {
+		gw_sha1_str(mac_addr, 6, gateway.mac_sha1);
+	} else {
+		memset(gateway.mac_sha1, '\0', sizeof(gateway.mac_sha1));
+		memcpy(gateway.mac_sha1, "MAC-undef", 9);
+	}
 
-    /* get uname info */
-    if (uname(&uname_data))
-    {
-        strcpy(gateway.sysname, "undefined");
-    }
-    else
-    {
-        strncpy(gateway.sysname, uname_data.sysname, _SYSNAME_STR_LENGTH);
-    }
+	/* get uname info */
+	if (uname(&uname_data))
+		strcpy(gateway.sysname, "undefined");
+	else
+		strncpy(gateway.sysname, uname_data.sysname, _SYSNAME_STR_LENGTH);
 }
 
 /**
