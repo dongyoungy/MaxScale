@@ -8,7 +8,11 @@ This section describes the limitations that are common to all configuration of p
 
 ## Limitations with MySQL Protocol support
 
-Compression is not included in MySQL server handshake
+* Compression
+
+This capability is not included in MySQL server handshake
+
+## Limitations with MySQL Master/Slave Replication monitoring
 
 ## Limitations with Galera Cluster Monitoring
 
@@ -16,9 +20,7 @@ The default master selection is based only on MIN(wsrep_local_index). This can b
 
 ## Limitations in the connection router
 
-* If Master changes (ie. new Master promotion) during current connection the router cannot check the change
-
-* LONGBLOB is not supported
+If Master changes (ie. new Master promotion) during current connection the router cannot check the change
 
 ## Limitations in the Read/Write Splitter
 
