@@ -310,7 +310,7 @@ static inline bool connect_to_db(MONITOR* mon,MONITOR_SERVERS *database)
 
 static inline void monitor_mysql100_db(MONITOR_SERVERS* database)
 {
-    int isslave = 0;
+    int isslave = false;
     MYSQL_RES* result;
     MYSQL_ROW row;
 
