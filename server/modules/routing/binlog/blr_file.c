@@ -650,7 +650,15 @@ blr_close_binlog(ROUTER_INSTANCE *router, BLFILE *file)
 	{
 		close(file->fd);
 		file->fd = -1;
+	}
+
+	if (file->refcnt == 0) {
+		spinlock_release(&file->lock);
+
 		free(file);
+	} else {
+		spinlock_release(&file->lock);
+	}
 }
 
 /**
