@@ -534,40 +534,83 @@ static TIMERANGE* parse_time(const char* str)
 {
     assert(str != NULL);
 
+	assert(str != NULL && instance != NULL);
+
     char strbuf[strlen(str) + 1];
-    char *separator;
-    struct tm start, end;
-    TIMERANGE* tr = NULL;
+    char *tok, *saved, *numend;
+	struct tm start, end;
 
-    memset(&start, 0, sizeof(start));
-    memset(&end, 0, sizeof(end));
-    strcpy(strbuf, str);
+    memset(&start,0,sizeof(struct tm));
+	memset(&end,0,sizeof(struct tm));
+    strncpy(strbuf, str, sizeof(strbuf));
 
-    if ((separator = strchr(strbuf, '-')))
-    {
-        *separator++ = '\0';
-        if (strptime(strbuf, "%H:%M:%S", &start) &&
-            strptime(separator, "%H:%M:%S", &end))
-        {
-            /** The time string was valid */
-            CHK_TIMES((&start));
-            CHK_TIMES((&end));
+    /** Process the start of the timerange */
+    if((tok = strtok_r(strbuf, "-: ", &saved)) == NULL)
+        return NULL;
 
-            tr = (TIMERANGE*) malloc(sizeof(TIMERANGE));
+    start.tm_hour = strtol(tok, &numend, 10);
 
-            if (tr)
-            {
-                tr->start = start;
-                tr->end = end;
-                tr->next = NULL;
-            }
-            else
-            {
-                MXS_ERROR("dbfwfilter: malloc returned NULL.");
-            }
-        }
-    }
-    return tr;
+    if(*numend != '\0')
+        return NULL;
+
+    if((tok = strtok_r(NULL, "-: ", &saved)) == NULL)
+        return NULL;
+
+    start.tm_min = strtol(tok, &numend, 10);
+
+    if(*numend != '\0')
+        return NULL;
+
+    if((tok = strtok_r(NULL, "-: ", &saved)) == NULL)
+        return NULL;
+
+    start.tm_sec = strtol(tok, &numend, 10);
+
+    if(*numend != '\0')
+        return NULL;
+
+    /** Process the end of the timerange */
+
+    if((tok = strtok_r(NULL, "-: ", &saved)) == NULL)
+        return NULL;
+
+    start.tm_hour = strtol(tok, &numend, 10);
+
+    if(*numend != '\0')
+        return NULL;
+
+    if((tok = strtok_r(NULL, "-: ", &saved)) == NULL)
+        return NULL;
+
+    start.tm_min = strtol(tok, &numend, 10);
+
+    if(*numend != '\0')
+        return NULL;
+
+    if((tok = strtok_r(NULL, "-: ", &saved)) == NULL)
+        return NULL;
+
+    start.tm_sec = strtol(tok, &numend, 10);
+
+    if(*numend != '\0')
+        return NULL;
+
+    CHK_TIMES((&start));
+    CHK_TIMES((&end));
+
+    /** The time string was valid */
+
+	TIMERANGE* tr = (TIMERANGE*)malloc(sizeof(TIMERANGE));
+
+	if(tr == NULL){
+		skygw_log_write(LOGFILE_ERROR, "dbfwfilter: malloc returned NULL.");
+		return NULL;
+	}
+
+    memcpy(&tr->start, &start, sizeof(start));
+    memcpy(&tr->end, &end, sizeof(end));
+    tr->next = NULL;
+	return tr;
 }
 
 /**
