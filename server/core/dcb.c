@@ -293,132 +293,104 @@ dcb_clone(DCB *orig)
 static void
 dcb_final_free(DCB *dcb)
 {
-    DCB_CALLBACK *cb;
+DCB_CALLBACK		*cb;
 
-    CHK_DCB(dcb);
-    ss_info_dassert(dcb->state == DCB_STATE_DISCONNECTED ||
-                    dcb->state == DCB_STATE_ALLOC,
-                    "dcb not in DCB_STATE_DISCONNECTED not in DCB_STATE_ALLOC state.");
+        CHK_DCB(dcb);
+        ss_info_dassert(dcb->state == DCB_STATE_DISCONNECTED || 
+                        dcb->state == DCB_STATE_ALLOC,
+                        "dcb not in DCB_STATE_DISCONNECTED not in DCB_STATE_ALLOC state.");
 
-    if (DCB_POLL_BUSY(dcb))
-    {
-        /* Check if DCB has outstanding poll events */
-        MXS_ERROR("dcb_final_free: DCB %p has outstanding events.", dcb);
-    }
+	if (DCB_POLL_BUSY(dcb))
+	{
+		/* Check if DCB has outstanding poll events */
+		LOGIF(LE, (skygw_log_write_flush(
+			LOGFILE_ERROR,
+			"dcb_final_free: DCB %p has outstanding events",
+			dcb)));
+	}
 
-    /*< First remove this DCB from the chain */
-    spinlock_acquire(&dcbspin);
-    if (allDCBs == dcb)
-    {
-        /*<
-         * Deal with the special case of removing the DCB at the head of
-         * the chain.
-         */
-        allDCBs = dcb->next;
-    }
-    else
-    {
-        /*<
-         * We find the DCB that point to the one we are removing and then
-         * set the next pointer of that DCB to the next pointer of the
-         * DCB we are removing.
-         */
-        DCB *ptr = allDCBs;
-        while (ptr && ptr->next != dcb)
-        {
-            ptr = ptr->next;
-        }
-        if (ptr)
-        {
-            ptr->next = dcb->next;
-        }
-    }
-    nDCBs--;
-    spinlock_release(&dcbspin);
+	/*< First remove this DCB from the chain */
+	spinlock_acquire(&dcbspin);
+	if (allDCBs == dcb)
+	{
+		/*<
+		 * Deal with the special case of removing the DCB at the head of
+		 * the chain.
+		 */
+		allDCBs = dcb->next;
+	}
+	else
+	{
+		/*<
+		 * We find the DCB that point to the one we are removing and then
+		 * set the next pointer of that DCB to the next pointer of the
+		 * DCB we are removing.
+		 */
+		DCB *ptr = allDCBs;
+		while (ptr && ptr->next != dcb)
+			ptr = ptr->next;
+		if (ptr)
+			ptr->next = dcb->next;
+	}
+	spinlock_release(&dcbspin);
 
-    if (dcb->session) {
-        /*<
-         * Terminate client session.
-         */
-        SESSION *local_session = dcb->session;
-        dcb->session = NULL;
-        CHK_SESSION(local_session);
-        /**
-         * Set session's client pointer NULL so that other threads
-         * won't try to call dcb_close for client DCB
-         * after this call.
-         */
-        if (local_session->client == dcb)
-        {
-            spinlock_acquire(&local_session->ses_lock);
-            local_session->client = NULL;
-            spinlock_release(&local_session->ses_lock);
-        }
-        if (SESSION_STATE_DUMMY != local_session->state)
-        {
-            session_free(local_session);
-        }
-    }
+        if (dcb->session) {
+                /*<
+                 * Terminate client session.
+                 */
+                {
+                        SESSION *local_session = dcb->session;
+			dcb->session = NULL;
+                        CHK_SESSION(local_session);
+                        /** 
+			 * Set session's client pointer NULL so that other threads
+			 * won't try to call dcb_close for client DCB
+			 * after this call.
+			 */
+                        if (local_session->client == dcb)
+			{
+				spinlock_acquire(&local_session->ses_lock);
+				local_session->client = NULL;
+				spinlock_release(&local_session->ses_lock);
+			}
+			session_free(local_session);
+		}
+	}
 
-    if (dcb->protocol && (!DCB_IS_CLONE(dcb)))
-    {
-        free(dcb->protocol);
-    }
-    if (dcb->protoname)
-    {
-        free(dcb->protoname);
-    }
-    if (dcb->remote)
-    {
-        free(dcb->remote);
-    }
-    if (dcb->user)
-    {
-        free(dcb->user);
-    }
+	if (dcb->protocol && (!DCB_IS_CLONE(dcb)))
+		free(dcb->protocol);	
+	if (dcb->remote)
+		free(dcb->remote);
+	if (dcb->user)
+		free(dcb->user);
 
-    /* Clear write and read buffers */
-    if (dcb->delayq)
-    {
-        GWBUF *queue = dcb->delayq;
-        while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL)
-        {
-            ;
-        }
-        dcb->delayq = NULL;
-    }
-    if (dcb->writeq)
-    {
+	/* Clear write and read buffers */	
+	if (dcb->delayq) {
+		GWBUF *queue = dcb->delayq;
+		while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL);
+	}
+    if (dcb->writeq) {
         GWBUF *queue = dcb->writeq;
-        while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL)
-        {
-            ;
-        }
+        while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL);
         dcb->writeq = NULL;
     }
-    if (dcb->dcb_readqueue)
-    {
-        GWBUF* queue = dcb->dcb_readqueue;
-        while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL)
+	if (dcb->dcb_readqueue)
         {
-            ;
+                GWBUF* queue = dcb->dcb_readqueue;
+                while ((queue = gwbuf_consume(queue, GWBUF_LENGTH(queue))) != NULL);
         }
-        dcb->dcb_readqueue = NULL;
-    }
 
-    spinlock_acquire(&dcb->cb_lock);
-    while ((cb = dcb->callbacks) != NULL)
-    {
-        dcb->callbacks = cb->next;
-        free(cb);
-    }
-    spinlock_release(&dcb->cb_lock);
-    if (dcb->ssl)
-    {
-        SSL_free(dcb->ssl);
-    }
-    bitmask_free(&dcb->memdata.bitmask);
-    free(dcb);
+	spinlock_acquire(&dcb->cb_lock);
+	while ((cb = dcb->callbacks) != NULL)
+	{
+		dcb->callbacks = cb->next;
+		free(cb);
+	}
+	spinlock_release(&dcb->cb_lock);
+	if(dcb->ssl)
+	    SSL_free(dcb->ssl);
+	bitmask_free(&dcb->memdata.bitmask);
+	free(dcb);
 }
 
 /**
