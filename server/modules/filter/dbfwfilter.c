@@ -534,14 +534,12 @@ static TIMERANGE* parse_time(const char* str)
 {
     assert(str != NULL);
 
-    assert(str != NULL && instance != NULL);
-
     char strbuf[strlen(str) + 1];
     char *separator;
     struct tm start, end;
     TIMERANGE* tr = NULL;
 
-    strncpy(strbuf, str, sizeof(strbuf));
+    strcpy(strbuf, str);
 
     if ((separator = strchr(strbuf, '-')))
     {
@@ -549,22 +547,22 @@ static TIMERANGE* parse_time(const char* str)
         if (strptime(strbuf, "%H:%M:%S", &start) &&
             strptime(separator, "%H:%M:%S", &end))
         {
+            /** The time string was valid */
             CHK_TIMES((&start));
             CHK_TIMES((&end));
 
-            /** The time string was valid */
-
             tr = (TIMERANGE*) malloc(sizeof(TIMERANGE));
 
-            if (tr == NULL)
+            if (tr)
+            {
+                tr->start = start;
+                tr->end = end;
+                tr->next = NULL;
+            }
+            else
             {
                 skygw_log_write(LOGFILE_ERROR, "dbfwfilter: malloc returned NULL.");
-                return NULL;
             }
-
-            memcpy(&tr->start, &start, sizeof(start));
-            memcpy(&tr->end, &end, sizeof(end));
-            tr->next = NULL;
         }
     }
     return tr;
@@ -962,11 +960,42 @@ bool parse_rule_definition(FW_INSTANCE* instance, RULE* ruledef, char* rule, cha
             }
             else if (strcmp(tok, "at_times") == 0)
             {
-                if (at_def)
-                {
-                    MXS_ERROR("dbfwfilter: Rule parsing failed, multiple 'at_times' tokens: %s", rule);
-                    rval = false;
-                    goto retblock;
+		if(at_def)
+		{
+		    skygw_log_write(LOGFILE_ERROR,"dbfwfilter: Rule parsing failed, multiple 'at_times' tokens: %s",rule);
+		    rval = false;
+		    goto retblock;
+		}
+		at_def = true;
+                tok = strtok_r(NULL, " ,",&saveptr);
+                TIMERANGE *tr = NULL;
+                while(tok){
+		    if(strcmp(tok,"on_queries") == 0)
+			break;
+		    if(!check_time(tok))
+		    {
+			skygw_log_write(LOGFILE_ERROR,"dbfwfilter: Rule parsing failed, malformed time definition: %s",tok);
+			rval = false;
+			goto retblock;
+		    }
+
+                    TIMERANGE *tmp = parse_time(tok);
+
+		    if(tmp == NULL)
+		    {
+			skygw_log_write(LOGFILE_ERROR,"dbfwfilter: Rule parsing failed, unexpected characters after time definition.");
+			rval = false;
+			tr_free(tr);
+			goto retblock;
+		    }
+
+                    if(IS_RVRS_TIME(tmp))
+		    {
+                        tmp = split_reverse_time(tmp);
+                    }
+                    tmp->next = tr;
+                    tr = tmp;
+                    tok = strtok_r(NULL, " ,",&saveptr);
                 }
 
                 at_def = true;
