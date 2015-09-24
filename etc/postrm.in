@@ -5,21 +5,13 @@
 # removed from the system.
 if [ "$1" -eq 0 ]
 then
-    if [ -f /etc/init.d/maxscale ]
+    rm -f /etc/init.d/maxscale
+    rm -f /etc/ld.so.conf.d/maxscale.conf
+    rm -f /usr/lib/systemd/system/maxscale.service
+else
+    # Copy and rename config from old location
+    if [ -f "/usr/local/mariadb-maxscale/etc/MaxScale.cnf" -a ! -f "/etc/maxscale.cnf" ]
     then
-        rm /etc/init.d/maxscale
-    fi
-
-    if [ -f /etc/ld.so.conf.d/maxscale.conf ]
-    then
-        rm /etc/ld.so.conf.d/maxscale.conf
-    fi
-
-    if [ -f /usr/lib/systemd/system/maxscale.service ]
-    then
-        rm /usr/lib/systemd/system/maxscale.service
-    elif [ -f /lib/systemd/system/maxscale.service ]
-    then
-        rm /lib/systemd/system/maxscale.service
+        cp "/usr/local/mariadb-maxscale/etc/MaxScale.cnf" "/etc/maxscale.cnf"
     fi
 fi
