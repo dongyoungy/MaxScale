@@ -725,8 +725,9 @@ char	path[PATH_MAX+1] = "";
 char	 *ptr;
 int	fd;
 
-	strncpy(path, router->binlogdir, PATH_MAX);
-	strncat(path, "/cache", PATH_MAX);
+	strncpy(path,get_datadir(),PATH_MAX);
+	strncat(path,"/",PATH_MAX);
+	strncat(path, router->service->name, PATH_MAX);
 
 	if (access(path, R_OK) == -1) {
 		mkdir(path, 0700);
@@ -762,8 +763,7 @@ char	*ptr;
 int	fd;
 GWBUF	*buf;
 
-	strncpy(path, router->binlogdir, PATH_MAX);
-	strncat(path, "/cache", PATH_MAX);
+	strncpy(path, get_datadir(),PATH_MAX);
 	strncat(path, "/", PATH_MAX);
 	strncat(path, response, PATH_MAX);
 
