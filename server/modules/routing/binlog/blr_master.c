@@ -87,18 +87,12 @@ static int  blr_rotate_event(ROUTER_INSTANCE *router, uint8_t *pkt, REP_HEADER *
 void blr_distribute_binlog_record(ROUTER_INSTANCE *router, REP_HEADER *hdr, uint8_t *ptr);
 static void *CreateMySQLAuthData(char *username, char *password, char *database);
 void blr_extract_header(uint8_t *pkt, REP_HEADER *hdr);
-static void blr_log_packet(int priority, char *msg, uint8_t *ptr, int len);
-void blr_master_close(ROUTER_INSTANCE *);
-char *blr_extract_column(GWBUF *buf, int col);
+inline uint32_t extract_field(uint8_t *src, int bits);
+static void blr_log_packet(logfile_id_t file, char *msg, uint8_t *ptr, int len);
+static void blr_master_close(ROUTER_INSTANCE *);
+static char *blr_extract_column(GWBUF *buf, int col);
 void blr_cache_response(ROUTER_INSTANCE *router, char *response, GWBUF *buf);
 void poll_fake_write_event(DCB *dcb);
-GWBUF *blr_read_events_from_pos(ROUTER_INSTANCE *router, unsigned long long pos, REP_HEADER *hdr, unsigned long long pos_end);
-static void blr_check_last_master_event(void *inst);
-extern int blr_check_heartbeat(ROUTER_INSTANCE *router);
-extern char * blr_last_event_description(ROUTER_INSTANCE *router);
-static void blr_log_identity(ROUTER_INSTANCE *router);
-static void blr_distribute_error_message(ROUTER_INSTANCE *router, char *message, char *state, unsigned int err_code);
-
 static int keepalive = 1;
 
 /**
@@ -109,9 +103,9 @@ static int keepalive = 1;
  * @param	router		The router instance
  */
 void
-blr_start_master(void* data)
+blr_start_master(void *data)
 {
-    ROUTER_INSTANCE *router = (ROUTER_INSTANCE*)data;
+ROUTER_INSTANCE *router = (ROUTER_INSTANCE*)data;
 DCB	*client;
 
 	router->stats.n_binlogs_ses = 0;

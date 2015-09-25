@@ -118,42 +118,11 @@ static int blr_slave_send_disconnected_server(ROUTER_INSTANCE *router, ROUTER_SL
 static int blr_slave_disconnect_all(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave);
 static int blr_slave_disconnect_server(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, int server_id);
 static int blr_slave_send_ok(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave);
-static int blr_stop_slave(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave);
-static int blr_start_slave(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave);
-static void blr_slave_send_error_packet(ROUTER_SLAVE *slave, char *msg, unsigned int err_num, char *status);
-static int blr_handle_change_master(ROUTER_INSTANCE* router, char *command, char *error);
-static int blr_set_master_hostname(ROUTER_INSTANCE *router, char *hostname);
-static int blr_set_master_port(ROUTER_INSTANCE *router, char *command);
-static char *blr_set_master_logfile(ROUTER_INSTANCE *router, char *filename, char *error);
-static void blr_master_get_config(ROUTER_INSTANCE *router, MASTER_SERVER_CFG *current_master);
-static void blr_master_free_config(MASTER_SERVER_CFG *current_master);
-static void blr_master_restore_config(ROUTER_INSTANCE *router, MASTER_SERVER_CFG *current_master);
-static void blr_master_set_empty_config(ROUTER_INSTANCE *router);
-static void blr_master_apply_config(ROUTER_INSTANCE *router, MASTER_SERVER_CFG *prev_master);
-static int blr_slave_send_ok_message(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave, char *message);
-static char *blr_get_parsed_command_value(char *input);
-static char **blr_validate_change_master_option(char *option, CHANGE_MASTER_OPTIONS *config);
-static int blr_set_master_user(ROUTER_INSTANCE *router, char *user);
-static int blr_set_master_password(ROUTER_INSTANCE *router, char *password);
-static int blr_parse_change_master_command(char *input, char *error_string, CHANGE_MASTER_OPTIONS *config);
-static int blr_handle_change_master_token(char *input, char *error, CHANGE_MASTER_OPTIONS *config);
-static void blr_master_free_parsed_options(CHANGE_MASTER_OPTIONS *options);
-static int blr_slave_send_var_value(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *variable, char *value, int column_type);
-static int blr_slave_send_variable(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *variable, char *value, int column_type);
-static int blr_slave_send_columndef_with_info_schema(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *name, int type, int len, uint8_t seqno);
-int blr_test_parse_change_master_command(char *input, char *error_string, CHANGE_MASTER_OPTIONS *config);
-char *blr_test_set_master_logfile(ROUTER_INSTANCE *router, char *filename, char *error);
-static int blr_slave_handle_variables(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *stmt);
-static int blr_slave_send_warning_message(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave, char *message);
-static int blr_slave_show_warnings(ROUTER_INSTANCE* router, ROUTER_SLAVE* slave);
-extern int MaxScaleUptime();
-static int blr_slave_send_status_variable(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *variable, char *value, int column_type);
-static int blr_slave_handle_status_variables(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *stmt);
-static int blr_slave_send_columndef_with_status_schema(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave, char *name, int type, int len, uint8_t seqno);
-static void blr_send_slave_heartbeat(void *inst);
-static int blr_slave_send_heartbeat(ROUTER_INSTANCE *router, ROUTER_SLAVE *slave);
-
 void poll_fake_write_event(DCB *dcb);
+
+extern int lm_enabled_logfiles_bitmask;
+extern size_t         log_ses_count[];
+extern __thread log_info_t tls_log_info;
 
 /**
  * Process a request packet from the slave server.

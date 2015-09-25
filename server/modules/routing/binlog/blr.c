@@ -134,7 +134,7 @@ static void	stats_func(void *);
 static bool rses_begin_locked_router_action(ROUTER_SLAVE *);
 static void rses_end_locked_router_action(ROUTER_SLAVE *);
 void my_uuid_init(ulong seed1, ulong seed2);
-void my_uuid(unsigned char *guid);
+void my_uuid(char *guid);
 GWBUF *blr_cache_read_response(ROUTER_INSTANCE *router, char *response);
 
 static SPINLOCK	instlock;
@@ -196,11 +196,7 @@ createInstance(SERVICE *service, char **options)
 ROUTER_INSTANCE	*inst;
 char		*value;
 int		i;
-unsigned char	*defuuid;
-char		path[PATH_MAX+1] = "";
-char		filename[PATH_MAX+1] = "";
-int		rc = 0;
-char		task_name[BLRM_TASK_NAME_LEN+1] = "";
+char	*defuuid;
 
 	if(service->credentials.name == NULL ||
 	   service->credentials.authdata == NULL)
@@ -1105,14 +1101,11 @@ struct tm	tm;
 				router_inst->lastEventReceived, (ptr != NULL) ? ptr : "unknown");
 		}
 
-		if (router_inst->lastEventTimestamp) {
-			time_t	last_event = (time_t)router_inst->lastEventTimestamp;
-			localtime_r(&last_event, &tm);
-			asctime_r(&tm, buf);
-			if (buf[strlen(buf)-1] == '\n') {
-				buf[strlen(buf)-1] = '\0';
-			}
-			dcb_printf(dcb, "\tLast binlog event timestamp:  			%ld (%s)\n",
+	if (router_inst->lastEventTimestamp)
+	{
+		localtime_r((const time_t*)&router_inst->lastEventTimestamp, &tm);
+		asctime_r(&tm, buf);
+		dcb_printf(dcb, "\tLast binlog event timestamp:  			%ld (%s)\n",
 				router_inst->lastEventTimestamp, buf);
 		}
 	} else {
@@ -1247,15 +1240,7 @@ struct tm	tm;
 			if (session->lastEventTimestamp
 					&& router_inst->lastEventTimestamp && session->lastEventReceived != HEARTBEAT_EVENT)
 			{
-				unsigned long seconds_behind;
-				time_t	session_last_event = (time_t)session->lastEventTimestamp;
-
-				if (router_inst->lastEventTimestamp > session->lastEventTimestamp)
-					seconds_behind  = router_inst->lastEventTimestamp - session->lastEventTimestamp;
-				else
-					seconds_behind = 0;
-
-				localtime_r(&session_last_event, &tm);
+				localtime_r((const time_t*)&session->lastEventTimestamp, &tm);
 				asctime_r(&tm, buf);
 				dcb_printf(dcb, "\t\tLast binlog event timestamp			%u, %s", session->lastEventTimestamp, buf);
 				dcb_printf(dcb, "\t\tSeconds behind master				%lu\n", seconds_behind);
@@ -1355,10 +1340,14 @@ errorReply(ROUTER *instance, void *router_session, GWBUF *message, DCB *backend_
 {
 ROUTER_INSTANCE	*router = (ROUTER_INSTANCE *)instance;
 int		error;
-socklen_t	len;
-char		msg[STRERROR_BUFLEN + 1 + 5] = "";
-char 		*errmsg;
-unsigned long	mysql_errno;
+socklen_t len;
+char		msg[85], *errmsg;
+
+	if (action == ERRACT_RESET)
+	{
+		backend_dcb->dcb_errhandle_called = false;
+		return;
+	}
 
 	/** Don't handle same error twice on same DCB */
         if (backend_dcb->dcb_errhandle_called)
