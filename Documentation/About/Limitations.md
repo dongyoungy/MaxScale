@@ -12,8 +12,6 @@ This section describes the limitations that are common to all configuration of p
 
 This capability is not included in MySQL server handshake
 
-## Limitations with MySQL Master/Slave Replication monitoring
-
 ## Limitations with Galera Cluster Monitoring
 
 The default master selection is based only on MIN(wsrep_local_index). This can be influenced with the server priority mechanic described in the [Galera Monitor](../Monitors/Galera-Monitor.md) manual.
