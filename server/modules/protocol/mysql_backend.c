@@ -32,7 +32,7 @@
  * 17/06/2013	Massimiliano Pinto	Added MaxScale To Backends routines
  * 01/07/2013	Massimiliano Pinto	Put Log Manager example code behind SS_DEBUG macros.
  * 03/07/2013	Massimiliano Pinto	Added delayq for incoming data before mysql connection
- * 04/07/2013	Massimiliano Pinto	Added asyncrhronous MySQL protocol connection to backend
+ * 04/07/2013	Massimiliano Pinto	Added asynchronous MySQL protocol connection to backend
  * 05/07/2013	Massimiliano Pinto	Added closeSession if backend auth fails
  * 12/07/2013	Massimiliano Pinto	Added Mysql Change User via dcb->func.auth()
  * 15/07/2013	Massimiliano Pinto	Added Mysql session change via dcb->func.session()
@@ -541,13 +541,25 @@ static int gw_read_backend_event(DCB *dcb) {
                 if (protocol_get_srv_command((MySQLProtocol *)dcb->protocol, false) != 
                         MYSQL_COM_UNDEFINED)
                 {
-                        read_buffer = process_response_data(dcb, read_buffer, nbytes_read);
+                        read_buffer = process_response_data(dcb, read_buffer, gwbuf_length(read_buffer));
 			/** 
 			 * Received incomplete response to session command.
 			 * Store it to readqueue and return.
 			 */
 			if (!sescmd_response_complete(dcb))
 			{
+				rc = 0;
+				goto return_rc;
+			}
+
+			if (!read_buffer) {
+                                LOGIF(LM, (skygw_log_write_flush(
+					LOGFILE_MESSAGE,
+                                        "%lu [gw_read_backend_event] "
+					"Read buffer unexpectedly null, even though response "
+					"not marked as complete. User: %s",
+                                        pthread_self(),
+                                        current_session->user)));
 				rc = 0;
 				goto return_rc;
 			}
@@ -701,6 +713,7 @@ gw_MySQLWrite_backend(DCB *dcb, GWBUF *queue)
 	MySQLProtocol *backend_protocol = dcb->protocol;
         int rc = 0; 
 
+        CHK_DCB(dcb);
         spinlock_acquire(&dcb->authlock);
         /**
          * Pick action according to state of protocol. 
@@ -710,10 +723,12 @@ gw_MySQLWrite_backend(DCB *dcb, GWBUF *queue)
         switch (backend_protocol->protocol_auth_state) {
                 case MYSQL_HANDSHAKE_FAILED:
                 case MYSQL_AUTH_FAILED:
-                        LOGIF(LE, (skygw_log_write_flush(
-                                LOGFILE_ERROR,
-                                "Error : Unable to write to backend due to "
-                                "authentication failure.")));
+            LOGIF(LE, (skygw_log_write_flush(LOGFILE_ERROR,
+                                             "Error : Unable to write to backend '%s' due to "
+                                             "%s failure. Server in state %s.",
+                                             dcb->server->unique_name,
+                                             backend_protocol->protocol_auth_state == MYSQL_HANDSHAKE_FAILED ? "handshake" : "authentication",
+                                             STRSRVSTATUS(dcb->server))));
                         /** Consume query buffer */
                         while ((queue = gwbuf_consume(
                                                 queue,
@@ -828,7 +843,6 @@ static int gw_error_backend_event(DCB *dcb)
         if (dcb->state != DCB_STATE_POLLING)
         {
 		int	error, len;
-		char	buf[100];
 
 		len = sizeof(error);
 		
@@ -836,12 +850,12 @@ static int gw_error_backend_event(DCB *dcb)
 		{
 			if (error != 0)
 			{
-				strerror_r(error, buf, 100);
+                                char errbuf[STRERROR_BUFLEN];
 				LOGIF(LE, (skygw_log_write_flush(
 						LOGFILE_ERROR,
 						"DCB in state %s got error '%s'.",
 						STRDCBSTATE(dcb->state),
-						buf)));
+						strerror_r(error, errbuf, sizeof(errbuf)))));
 			}
 		}
                 return 1;
@@ -871,18 +885,17 @@ static int gw_error_backend_event(DCB *dcb)
         if (ses_state != SESSION_STATE_ROUTER_READY)
         {
 		int	error, len;
-		char	buf[100];
 
 		len = sizeof(error);
 		if (getsockopt(dcb->fd, SOL_SOCKET, SO_ERROR, &error, (socklen_t *)&len) == 0)
 		{
 			if (error != 0)
 			{
-				strerror_r(error, buf, 100);
+                                char errbuf[STRERROR_BUFLEN];
 				LOGIF(LE, (skygw_log_write_flush(
 						LOGFILE_ERROR,
 						"Error '%s' in session that is not ready for routing.",
-						buf)));
+						strerror_r(error, errbuf, sizeof(errbuf)))));
 			}
 		}		
                 gwbuf_free(errbuf);
@@ -1097,19 +1110,18 @@ gw_backend_hangup(DCB *dcb)
         if (ses_state != SESSION_STATE_ROUTER_READY)
         {
 		int	error, len;
-		char	buf[100];
 
 		len = sizeof(error);
 		if (getsockopt(dcb->fd, SOL_SOCKET, SO_ERROR, &error, (socklen_t *)&len) == 0)
 		{
 			if (error != 0 && ses_state != SESSION_STATE_STOPPING)
 			{
-				strerror_r(error, buf, 100);
+                                char errbuf[STRERROR_BUFLEN];
 				LOGIF(LE, (skygw_log_write_flush(
 						LOGFILE_ERROR,
 						"Hangup in session that is not ready for routing, "
 						"Error reported is '%s'.",
-						buf)));
+						strerror_r(error, errbuf, sizeof(errbuf)))));
 			}
 		}
                 gwbuf_free(errbuf);
@@ -1517,7 +1529,9 @@ static GWBUF* process_response_data (
         ssize_t        nbytes_left   = 0; /*< nbytes to be read for the packet */
         MySQLProtocol* p;
         GWBUF*         outbuf = NULL;
-      
+	int initial_packets = npackets_left;
+	ssize_t initial_bytes = nbytes_left;
+
         /** Get command which was stored in gw_MySQLWrite_backend */
         p = DCB_PROTOCOL(dcb, MySQLProtocol);
 	if (!DCB_IS_CLONE(dcb)) CHK_PROTOCOL(p);
@@ -1561,10 +1575,13 @@ static GWBUF* process_response_data (
                                 */
                                 init_response_status(readbuf, srvcmd, &npackets_left, &nbytes_left);
                         }
+
+			initial_packets = npackets_left;
+			initial_bytes = nbytes_left;
                 }
                 /** Only session commands with responses should be processed */
                 ss_dassert(npackets_left > 0);
-                
+
                 /** Read incomplete packet. */
                 if (nbytes_left > nbytes_to_process)
                 {
@@ -1638,7 +1655,17 @@ static GWBUF* process_response_data (
 				 * bytes in the buffer or it is NULL, we need to
 				 wait for more data from the backend server.*/
 				if(readbuf == NULL || GWBUF_LENGTH(readbuf) < 3)
-				    break;
+				{
+				    skygw_log_write(LD," %lu [%s] Read %d packets. Waiting for %d more packets for a total of %d packets.",
+					     pthread_self(),__FUNCTION__,initial_packets - npackets_left,
+					     npackets_left,initial_packets);
+
+				    /** Store the already read data into the readqueue of the DCB
+				     * and restore the response status to the initial number of packets */
+				    dcb->dcb_readqueue = gwbuf_append(outbuf,dcb->dcb_readqueue);
+				    protocol_set_response_status(p, initial_packets, initial_bytes);
+				    return NULL;
+				}
 
 				data = GWBUF_DATA(readbuf);
 				nbytes_left = MYSQL_GET_PACKET_LEN(data)+MYSQL_HEADER_LEN;

@@ -609,9 +609,11 @@ char** tokenize_string(char* str)
 				char** tmp = realloc(list,sizeof(char*)*(sz*2));
 				if(tmp == NULL)
 				{
+                                        char errbuf[STRERROR_BUFLEN];
 					LOGIF(LE, (skygw_log_write_flush(
-                           LOGFILE_ERROR,
-                           "Error : realloc returned NULL: %s.",strerror(errno))));
+                                                   LOGFILE_ERROR,
+                                                   "Error : realloc returned NULL: %s.",
+                                                   strerror_r(errno, errbuf, sizeof(errbuf)))));
 					free(list);
 					return NULL;
 				}
@@ -4518,7 +4520,12 @@ int process_show_shards(ROUTER_CLIENT_SES* rses)
 
     sl.iter = iter;
     sl.rses = rses;
-    sl.rset = resultset_create(shard_list_cb,&sl);
+    if((sl.rset = resultset_create(shard_list_cb,&sl)) == NULL)
+    {
+	skygw_log_write(LE,"[%s] Error: Failed to create resultset.",__FUNCTION__);
+	return -1;
+    }
+
     resultset_add_column(sl.rset,"Database",MYSQL_DATABASE_MAXLEN,COL_TYPE_VARCHAR);
     resultset_add_column(sl.rset,"Server",MYSQL_DATABASE_MAXLEN,COL_TYPE_VARCHAR);
     resultset_stream_mysql(sl.rset,rses->rses_client_dcb);

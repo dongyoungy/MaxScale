@@ -13,7 +13,7 @@
  * this program; if not, write to the Free Software Foundation, Inc., 51
  * Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  * 
- * Copyright MariaDB Corporation Ab 2013-2014
+ * Copyright MariaDB Corporation Ab 2013-2015
  * 
  */
 
@@ -86,6 +86,10 @@
 #include <ini.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/file.h>
+
+#define STRING_BUFFER_SIZE 1024
+#define PIDFD_CLOSED -1
 
 /** for procname */
 #if !defined(_GNU_SOURCE)
@@ -139,7 +143,7 @@ static char	datadir[PATH_MAX+1] = "";
 static bool	datadir_defined = false; /*< If the datadir was already set */
 /* The data directory we created for this gateway instance */
 static char	pidfile[PATH_MAX+1] = "";
-
+static int pidfd = PIDFD_CLOSED;
 
 /**
  * exit flag for log flusher.
@@ -155,6 +159,8 @@ static bool libmysqld_started = FALSE;
  * If MaxScale is started to run in daemon process the value is true.
  */
 static bool     daemon_mode = true;
+
+static const char* maxscale_commit = MAXSCALE_COMMIT;
 
 const char *progname = NULL;
 static struct option long_options[] = {
@@ -174,6 +180,8 @@ static struct option long_options[] = {
   {"user",required_argument,0,'U'},
   {"version",  no_argument,       0, 'v'},
   {"help",     no_argument,       0, '?'},
+  {"version-full", no_argument, 0, 'V'},
+  {"log_augmentation", required_argument, 0, 'G'},
   {0, 0, 0, 0}
 };
 static int cnf_preparser(void* data, const char* section, const char* name, const char* value);
@@ -181,6 +189,7 @@ static void log_flush_shutdown(void);
 static void log_flush_cb(void* arg);
 static int write_pid_file(); /* write MaxScale pidfile */
 static void unlink_pidfile(void); /* remove pidfile */
+static void unlock_pidfile();
 static void libmysqld_done(void);
 static bool file_write_header(FILE* outfile);
 static bool file_write_footer(FILE* outfile);
@@ -189,6 +198,7 @@ static int ntfw_cb(const char*, const struct stat*, int, struct FTW*);
 static bool file_is_readable(char* absolute_pathname);
 static bool file_is_writable(char* absolute_pathname);
 bool handle_path_arg(char** dest, char* path, char* arg, bool rd, bool wr);
+static void set_log_augmentation(const char* value);
 static void usage(void);
 static char* get_expanded_pathname(
         char** abs_path,
@@ -207,7 +217,8 @@ static bool resolve_maxscale_conf_fname(
 
 static char* check_dir_access(char* dirname,bool,bool);
 static int set_user();
-
+bool pid_file_exists();
+void write_child_exit_code(int fd, int code);
 /** SSL multi-threading functions and structures */
 
 static SPINLOCK* ssl_locks;
@@ -315,9 +326,9 @@ static void sigusr1_handler (int i)
 static void sigterm_handler (int i) {
         extern void shutdown_server();
         
-	LOGIF(LE, (skygw_log_write_flush(
+	skygw_log_write_flush(
                 LOGFILE_ERROR,
-                "MaxScale received signal SIGTERM. Exiting.")));
+                "MaxScale received signal SIGTERM. Exiting.");
 	skygw_log_sync_all();
 	shutdown_server();
 }
@@ -327,9 +338,9 @@ sigint_handler (int i)
 {
         extern void shutdown_server();
 
-	LOGIF(LE, (skygw_log_write_flush(
+	skygw_log_write_flush(
                 LOGFILE_ERROR,
-                "MaxScale received signal SIGINT. Shutting down.")));
+                "MaxScale received signal SIGINT. Shutting down.");
 	skygw_log_sync_all();
 	shutdown_server();
 	fprintf(stderr, "\n\nShutting down MaxScale\n\n");
@@ -343,10 +354,9 @@ sigchld_handler (int i)
 
     if((child = wait(&exit_status)) == -1)
     {
-	char errbuf[512];
-	strerror_r(errno,errbuf,511);
-	errbuf[511] = '\0';
-	skygw_log_write_flush(LE,"Error: failed to wait child process: %d %s",errno,errbuf);
+        char errbuf[STRERROR_BUFLEN];
+	skygw_log_write_flush(LE,"Error: failed to wait child process: %d %s",
+                              errno,strerror_r(errno, errbuf, sizeof(errbuf)));
     }
     else
     {
@@ -383,12 +393,16 @@ sigfatal_handler (int i)
 		_exit(1);
 	}
 	fatal_handling = 1;
+        GATEWAY_CONF* cnf = config_get_global_options();
+	fprintf(stderr, "\n\nMaxScale "MAXSCALE_VERSION" received fatal signal %d\n", i);
 
-	fprintf(stderr, "\n\nMaxScale received fatal signal %d\n", i);
-
-	LOGIF(LE, (skygw_log_write_flush(
+	skygw_log_write_flush(
                 LOGFILE_ERROR,
-                "Fatal: MaxScale received fatal signal %d. Attempting backtrace.", i)));
+                "Fatal: MaxScale "MAXSCALE_VERSION" received fatal signal %d. Attempting backtrace.", i);
+
+        skygw_log_write_flush(LE,"Commit ID: %s System name: %s "
+                "Release string: %s Embedded library version: %s",
+                maxscale_commit, cnf->sysname, cnf->release_string, cnf->version_string);
 
 	{
 		void *addrs[128];
@@ -397,9 +411,9 @@ sigfatal_handler (int i)
 
 		if (symbols) {
 			for( n = 0; n < count; n++ ) {
-				LOGIF(LE, (skygw_log_write_flush(
+				skygw_log_write_flush(
 					LOGFILE_ERROR,
-					"  %s\n", symbols[n])));
+					"  %s\n", symbols[n]);
 			}
 			free(symbols);
 		} else {
@@ -444,12 +458,13 @@ static int signal_set (int sig, void (*handler)(int)) {
         {
                 int eno = errno;
                 errno = 0;
-		LOGIF(LE, (skygw_log_write_flush(
+                char errbuf[STRERROR_BUFLEN];
+		skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Failed call sigaction() in %s due to %d, %s.",
                         program_invocation_short_name,
                         eno,
-                        strerror(eno))));
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
                 rc = 1;
 	}
         return rc;
@@ -472,14 +487,14 @@ int ntfw_cb(
         {
                 int eno = errno;
                 errno = 0;
-                
-                LOGIF(LE, (skygw_log_write(
+                char errbuf[STRERROR_BUFLEN];
+                skygw_log_write(
                         LOGFILE_ERROR,
                         "Error : Failed to remove the data directory %s of "
                         "MaxScale due to %d, %s.",
                         datadir,
                         eno,
-                        strerror(eno))));
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
         }
         return rc;
 }
@@ -719,23 +734,26 @@ static char* check_dir_access(
 
 	if(access(dirname,F_OK) != 0)
 	{
-	    sprintf(errbuf,"Can't access '%s'.",dirname);
+	    snprintf(errbuf,PATH_MAX*2-1,"Can't access '%s'.",dirname);
+	    errbuf[PATH_MAX*2-1] = '\0';
 		errstr = strdup(errbuf);
 		goto retblock;
 	}
 
 	if (rd && !file_is_readable(dirname))
 	{
-	    sprintf(errbuf,"MaxScale doesn't have read permission "
-				"to '%s'.",dirname);
+	    snprintf(errbuf,PATH_MAX*2-1,"MaxScale doesn't have read permission "
+		    "to '%s'.",dirname);
+	    errbuf[PATH_MAX*2-1] = '\0';
 		errstr = strdup(errbuf);
 		goto retblock;
 	}
 	
 	if (wr && !file_is_writable(dirname))
 	{
-	    	    sprintf(errbuf,"MaxScale doesn't have write permission "
-				"to '%s'.",dirname);
+	    snprintf(errbuf,PATH_MAX*2-1,"MaxScale doesn't have write permission "
+		    "to '%s'.",dirname);
+		    errbuf[PATH_MAX*2-1] = '\0';
 		errstr = strdup(errbuf);
 		goto retblock;
 	}
@@ -770,21 +788,23 @@ static void print_log_n_stderr(
         char* fpr_end   = "\n*\n";
         
         if (do_log) {
-                LOGIF(LE, (skygw_log_write_flush(
+                char errbuf[STRERROR_BUFLEN];
+                skygw_log_write_flush(
                                    LOGFILE_ERROR,
                                    "%s %s %s %s",
                                    log_err,
                                    logstr,
                                    eno == 0 ? " " : "Error :",
-                                   eno == 0 ? " " : strerror(eno))));
+                                   eno == 0 ? " " : strerror_r(eno, errbuf, sizeof(errbuf)));
         }
         if (do_stderr) {
+                char errbuf[STRERROR_BUFLEN];
                 fprintf(stderr,
                         "%s %s %s %s %s",
                         fpr_err,
                         fprstr,
                         eno == 0 ? " " : "Error :",
-                        eno == 0 ? " " : strerror(eno),
+                        eno == 0 ? " " : strerror_r(eno, errbuf, sizeof(errbuf)),
                         fpr_end);
         }
 }
@@ -798,6 +818,7 @@ static bool file_is_readable(
         {
                 int eno = errno;
                 errno = 0;
+                char errbuf[STRERROR_BUFLEN];
 
                 if (!daemon_mode)
                 {
@@ -805,16 +826,16 @@ static bool file_is_readable(
                                 "*\n* Warning : Failed to read the configuration "
                                 "file %s. %s.\n*\n",
                                 absolute_pathname,
-                                strerror(eno));
+                                strerror_r(eno, errbuf, sizeof(errbuf)));
                 }
-                LOGIF(LE, (skygw_log_write_flush(
+                skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Warning : Failed to read the configuration file %s due "
                         "to %d, %s.",
                         absolute_pathname,
                         eno,
-                        strerror(eno))));
-		LOGIF(LE,(skygw_log_sync_all()));
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
+                skygw_log_sync_all();
                 succp = false;
         }
         return succp;
@@ -829,6 +850,7 @@ static bool file_is_writable(
         {
                 int eno = errno;
                 errno = 0;
+                char errbuf[STRERROR_BUFLEN];
 
                 if (!daemon_mode)
                 {
@@ -837,15 +859,15 @@ static bool file_is_writable(
                                 "due %d, %s.\n*\n",
                                 absolute_pathname,
                                 eno,
-                                strerror(eno));
+                                strerror_r(eno, errbuf, sizeof(errbuf)));
                 }
-                LOGIF(LE, (skygw_log_write_flush(
+                skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : unable to open file %s for write due "
                         "to %d, %s.",
                         absolute_pathname,
                         eno,
-                        strerror(eno))));
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
                 succp = false;
         }
         return succp;
@@ -892,21 +914,22 @@ static char* get_expanded_pathname(
         {
                 int eno = errno;
                 errno = 0;
-                
+                char errbuf[STRERROR_BUFLEN];
+
                 fprintf(stderr,
                         "*\n* Warning : Failed to read the "
                         "directory %s. %s.\n*\n",
                         relative_path,
-                        strerror(eno));
-                
-                LOGIF(LE, (skygw_log_write_flush(
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
+
+                skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Warning : Failed to read the "
                         "directory %s, due "
                         "to %d, %s.",
                         relative_path,
                         eno,
-                        strerror(eno))));
+                        strerror_r(eno, errbuf, sizeof(errbuf)));
                 free(expanded_path);
                 *output_path = NULL;
                 goto return_cnf_file_buf;
@@ -927,11 +950,12 @@ static char* get_expanded_pathname(
                 if (cnf_file_buf == NULL)
                 {
 			ss_dassert(cnf_file_buf != NULL);
-			
-			LOGIF(LE, (skygw_log_write_flush(
+                        char errbuf[STRERROR_BUFLEN];
+
+			skygw_log_write_flush(
 				LOGFILE_ERROR,
-				"Error : Memory allocation failed due to %s.", 
-				strerror(errno))));		
+				"Error : Memory allocation failed due to %s.",
+				strerror_r(errno, errbuf, sizeof(errbuf)));
 			
                         free(expanded_path);
                         expanded_path = NULL;
@@ -1003,6 +1027,7 @@ static void usage(void)
 		"  -s, --syslog=[yes|no]      log messages to syslog (default:yes)\n"
 		"  -S, --maxscalelog=[yes|no] log messages to MaxScale log (default: yes)\n"
 		"  -v, --version              print version info and exit\n"
+                "  -V, --version-full         print full version info and exit\n"
                 "  -?, --help                 show this help\n"
 		, progname);
 }
@@ -1043,11 +1068,15 @@ int main(int argc, char **argv)
         int 	 l;
         int	 i;
         int      n;
+        int      ini_rval;
 	intptr_t thread_id;
         int      n_threads; /*< number of epoll listener threads */ 
         int      n_services;
         int      eno = 0;   /*< local variable for errno */
         int      opt;
+        int      daemon_pipe[2];
+        bool     parent_process;
+        int      child_status;
         void**	 threads = NULL;   /*< thread list */
         char	 mysql_home[PATH_MAX+1];
         char	 datadir_arg[10+PATH_MAX+1];  /*< '--datadir='  + PATH_MAX */
@@ -1076,7 +1105,8 @@ int main(int argc, char **argv)
         sigemptyset(&sigpipe_mask);
         sigaddset(&sigpipe_mask, SIGPIPE);
 	progname = *argv;
-        sprintf(datadir, "%s", default_datadir);
+        snprintf(datadir,PATH_MAX, "%s", default_datadir);
+	datadir[PATH_MAX] = '\0';
 #if defined(FAKE_CODE)
         memset(conn_open, 0, sizeof(bool)*10240);
         memset(dcb_fake_write_errno, 0, sizeof(unsigned char)*10240);
@@ -1104,7 +1134,7 @@ int main(int argc, char **argv)
                 }
         }
 
-        while ((opt = getopt_long(argc, argv, "dc:f:l:vs:S:?L:D:C:B:U:A:P:",
+        while ((opt = getopt_long(argc, argv, "dc:f:l:vVs:S:?L:D:C:B:U:A:P:G:",
 				 long_options, &option_index)) != -1)
         {
                 bool succp = true;
@@ -1139,8 +1169,13 @@ int main(int argc, char **argv)
 			
 		case 'v':
 		  rc = EXIT_SUCCESS;
-          printf("%s\n",MAXSCALE_VERSION);
-                  goto return_main;		  
+                  printf("MaxScale %s\n", MAXSCALE_VERSION);
+                  goto return_main;
+
+                case 'V':
+		  rc = EXIT_SUCCESS;
+                  printf("MaxScale %s - %s\n", MAXSCALE_VERSION, maxscale_commit);
+                  goto return_main;
 
 		case 'l':
 			if (strncasecmp(optarg, "file", PATH_MAX) == 0)
@@ -1191,7 +1226,8 @@ int main(int argc, char **argv)
 		    }
 		    break;
 		case 'D':
-		    sprintf(datadir,"%s",optarg);
+		    snprintf(datadir,PATH_MAX,"%s",optarg);
+		    datadir[PATH_MAX] = '\0';
 		    set_datadir(strdup(optarg));
 		    datadir_defined = true;
 		    break;
@@ -1261,6 +1297,9 @@ int main(int argc, char **argv)
 			succp = false;
 		    }
 		    break;
+                case 'G':
+                    set_log_augmentation(optarg);
+                    break;
 		case '?':
 		  usage();
 		  rc = EXIT_SUCCESS;
@@ -1291,6 +1330,13 @@ int main(int argc, char **argv)
         }
         else 
         {
+            if(pipe(daemon_pipe) == -1)
+            {
+                fprintf(stderr,"Error: Failed to create pipe for inter-process communication: %d %s",errno,strerror(errno));
+                rc = MAXSCALE_INTERNALERROR;
+                goto return_main;
+            }
+
                 /*<
                  * Maxscale must be daemonized before opening files, initializing
                  * embedded MariaDB and in general, as early as possible.
@@ -1423,7 +1469,37 @@ int main(int argc, char **argv)
                         rc = MAXSCALE_INTERNALERROR;
                         goto return_main;
                 }
-                gw_daemonize();
+
+                /** Daemonize the process and wait for the child process to notify
+                 * the parent process of its exit status. */
+                parent_process = gw_daemonize();
+
+                if(parent_process)
+                {
+                    close(daemon_pipe[1]);
+                    int nread = read(daemon_pipe[0],(void*)&child_status,sizeof(int));
+                    close(daemon_pipe[0]);
+
+                    if(nread == -1)
+                    {
+                        char* logerr = "Failed to read data from child process pipe.";
+                        print_log_n_stderr(true, true, logerr, logerr, errno);
+                        exit(MAXSCALE_INTERNALERROR);
+                    }
+                    else if(nread == 0)
+                    {
+                        /** Child process has exited or closed write pipe */
+                        char* logerr = "No data read from child process pipe.";
+                        print_log_n_stderr(true, true, logerr, logerr, 0);
+                        exit(MAXSCALE_INTERNALERROR);
+                    }
+
+                    exit(child_status);
+                }
+
+                /** This is the child process and we can close the read end of
+                 * the pipe. */
+                close(daemon_pipe[0]);
         }
         /*<
          * Set signal handlers for SIGHUP, SIGTERM, SIGINT and critical signals like SIGSEGV.
@@ -1566,25 +1642,45 @@ int main(int argc, char **argv)
          */
 	char pathbuf[PATH_MAX+1];
 	snprintf(pathbuf,PATH_MAX,"%s",get_configdir());
+	pathbuf[PATH_MAX] = '\0';
 	if(pathbuf[strlen(pathbuf)-1] != '/')
 	    strcat(pathbuf,"/");
 
         if (!resolve_maxscale_conf_fname(&cnf_file_path, pathbuf, cnf_file_arg))
         {
-                ss_dassert(cnf_file_path == NULL);
                 rc = MAXSCALE_BADCONFIG;
                 goto return_main;
         }
 
-	if(ini_parse(cnf_file_path,cnf_preparser,NULL) != 0)
+	if((ini_rval = ini_parse(cnf_file_path, cnf_preparser,NULL)) != 0)
 	{
+            char errorbuffer[STRING_BUFFER_SIZE];
+
+            if(ini_rval > 0)
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to pre-parse configuration file. Error on line %d.", ini_rval);
+            else if(ini_rval == -1)
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to pre-parse configuration file. Failed to open file.");
+            else
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to pre-parse configuration file. Memory allocation failed.");
+
+            skygw_log_write(LE, errorbuffer);
+            if(!daemon_mode)
+            {
+                strncat(errorbuffer, "\n", STRING_BUFFER_SIZE);
+                fprintf(stderr, "%s", errorbuffer);
+            }
+
 	    rc = MAXSCALE_BADCONFIG;
 	    goto return_main;
 	}
 
 
         /** Use the cache dir for the mysql folder of the embedded library */
-	sprintf(mysql_home, "%s/mysql", get_cachedir());
+	snprintf(mysql_home,PATH_MAX, "%s/mysql", get_cachedir());
+	mysql_home[PATH_MAX] = '\0';
 	setenv("MYSQL_HOME", mysql_home, 1);
 
 
@@ -1657,23 +1753,28 @@ int main(int argc, char **argv)
          * machine.
          */
 
-	sprintf(datadir,"%s/data",get_datadir());
+	snprintf(datadir,PATH_MAX, "%s", get_datadir());
+	datadir[PATH_MAX] = '\0';
 	if(mkdir(datadir, 0777) != 0){
 
 	    if(errno != EEXIST){
+                char errbuf[STRERROR_BUFLEN];
 		fprintf(stderr,
-		 "Error: Cannot create data directory '%s': %d %s\n",datadir,errno,strerror(errno));
+                        "Error: Cannot create data directory '%s': %d %s\n",
+                        datadir, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 		goto return_main;
 	    }
 	}
 
-        sprintf(datadir, "%s/data/data%d", get_datadir(), getpid());
+        snprintf(datadir,PATH_MAX, "%s/data%d", get_datadir(), getpid());
 
 	if(mkdir(datadir, 0777) != 0){
 
 	    if(errno != EEXIST){
+                char errbuf[STRERROR_BUFLEN];
 		fprintf(stderr,
-		 "Error: Cannot create data directory '%s': %d %s\n",datadir,errno,strerror(errno));
+                        "Error: Cannot create data directory '%s': %d %s\n",
+                        datadir, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 		goto return_main;
 	    }
 	}
@@ -1772,7 +1873,7 @@ int main(int argc, char **argv)
                                 }
                         }
                 }
-                LOGIF(LE, (skygw_log_write_flush(
+                skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : mysql_library_init failed. It is a "
                         "mandatory component, required by router services and "
@@ -1780,7 +1881,7 @@ int main(int argc, char **argv)
                         mysql_errno(NULL),
                         mysql_error(NULL),
                         __FILE__,
-                        __LINE__)));
+                        __LINE__);
                 rc = MAXSCALE_NOLIBRARY;
                 goto return_main;
         }
@@ -1791,25 +1892,39 @@ int main(int argc, char **argv)
                 char* fprerr = "Failed to load MaxScale configuration "
                         "file. Exiting. See the error log for details.";
                 print_log_n_stderr(false, !daemon_mode, fprerr, fprerr, 0);
-                LOGIF(LE, (skygw_log_write_flush(
+                skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Failed to load MaxScale configuration file %s. "
                         "Exiting.",
-                        cnf_file_path)));
+                        cnf_file_path);
                 rc = MAXSCALE_BADCONFIG;
                 goto return_main;
         }
         LOGIF(LM, (skygw_log_write(
                 LOGFILE_MESSAGE,
-                "MariaDB Corporation MaxScale %s (C) MariaDB Corporation Ab 2013-2014",
+                "MariaDB Corporation MaxScale %s (C) MariaDB Corporation Ab 2013-2015",
 		MAXSCALE_VERSION))); 
         LOGIF(LM, (skygw_log_write(
                 LOGFILE_MESSAGE,
                 "MaxScale is running in process  %i",
                 getpid())));
 
+	/** Check if a MaxScale process is already running */
+	if(pid_file_exists())
+	{
+	    /** There is a process with the PID of the maxscale.pid file running.
+	     * Assuming that this is an already running MaxScale process, we
+	     * should exit with an error code.  */
+	    rc = MAXSCALE_ALREADYRUNNING;
+	    goto return_main;
+	}
+
 	/* Write process pid into MaxScale pidfile */
-	write_pid_file();
+	if(write_pid_file() != 0)
+        {
+            rc = MAXSCALE_ALREADYRUNNING;
+            goto return_main;
+        }
 
 	/* Init MaxScale poll system */
         poll_init();
@@ -1880,6 +1995,13 @@ int main(int argc, char **argv)
 	CRYPTO_set_id_callback(pthread_self);
 #endif
 
+        /**
+         * Successful start, notify the parent process that it can exit.
+         */
+        ss_dassert(rc == MAXSCALE_SHUTDOWN);
+        if(daemon_mode)
+            write_child_exit_code(daemon_pipe[1], rc);
+
 	MaxScaleStarted = time(0);
         /*<
          * Serve clients.
@@ -1914,9 +2036,17 @@ int main(int argc, char **argv)
 
 	unload_all_modules();
 	/* Remove Pidfile */
+        unlock_pidfile();
 	unlink_pidfile();
 	
 return_main:
+
+        if(daemon_mode && rc != MAXSCALE_SHUTDOWN)
+        {
+            /** Notify the parent process that an error has occurred */
+            write_child_exit_code(daemon_pipe[1], rc);
+        }
+
 	if (threads)
 		free(threads);
 	if (cnf_file_path)
@@ -1975,6 +2105,21 @@ static void log_flush_cb(
                                    "Finished MaxScale log flusher.")));
 }
 
+static void unlock_pidfile()
+{
+    if(pidfd != PIDFD_CLOSED)
+    {
+        if(flock(pidfd,LOCK_UN|LOCK_NB) != 0)
+        {
+            char logbuf[STRING_BUFFER_SIZE + PATH_MAX];
+            char* logerr = "Failed to unlock PID file '%s'.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pidfile);
+            print_log_n_stderr(true, true, logbuf, logbuf, errno);
+        }
+        close(pidfd);
+    }
+}
+
 /** 
  * Unlink pid file, called at program exit
  */
@@ -1983,13 +2128,139 @@ static void unlink_pidfile(void)
 	if (strlen(pidfile)) {
 		if (unlink(pidfile)) 
 		{
+                        char errbuf[STRERROR_BUFLEN];
 			fprintf(stderr, 
 				"MaxScale failed to remove pidfile %s: error %d, %s\n", 
 				pidfile, 
 				errno, 
-				strerror(errno));
+				strerror_r(errno, errbuf, sizeof(errbuf)));
 		}
 	}
+}
+
+/**
+ * Check if the maxscale.pid file exists and has a valid PID in it. If one has already been
+ * written and a MaxScale process is running, this instance of MaxScale should shut down.
+ * @return True if the conditions for starting MaxScale are not met and false if
+ * no PID file was found or there is no process running with the PID of the maxscale.pid
+ * file. If false is returned, this process should continue normally.
+ */
+bool pid_file_exists()
+{
+    char pathbuf[PATH_MAX+1];
+    char logbuf[STRING_BUFFER_SIZE + PATH_MAX];
+    char pidbuf[STRING_BUFFER_SIZE];
+    pid_t pid;
+    bool lock_failed = false;
+
+    snprintf(pathbuf, PATH_MAX, "%s/maxscale.pid",get_piddir());
+    pathbuf[PATH_MAX] = '\0';
+
+    if(access(pathbuf,F_OK) != 0)
+	return false;
+
+    if(access(pathbuf,R_OK) == 0)
+    {
+        int fd, b;
+
+	if((fd = open(pathbuf, O_RDWR)) == -1)
+	{
+	    char* logerr = "Failed to open PID file '%s'.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+	    print_log_n_stderr(true, true, logbuf, logbuf, errno);
+	    return true;
+	}
+        if(flock(fd,LOCK_EX|LOCK_NB))
+        {
+            if(errno != EWOULDBLOCK)
+            {
+                char* logerr = "Failed to lock PID file '%s'.";
+                snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+                print_log_n_stderr(true, true, logbuf, logbuf, errno);
+                close(fd);
+                return true;
+            }
+            lock_failed = true;
+        }
+
+        pidfd = fd;
+        b = read(fd,pidbuf,sizeof(pidbuf));
+
+	if(b == -1)
+	{
+	    char* logerr = "Failed to read from PID file '%s'.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+	    print_log_n_stderr(true, true, logbuf, logbuf, errno);
+            unlock_pidfile();
+	    return true;
+	}
+        else if(b == 0)
+	{
+	    /** Empty file */
+	    char* logerr = "PID file read from '%s'. File was empty.\n"
+            "If the file is the correct PID file and no other MaxScale processes "
+            "are running, please remove it manually and start MaxScale again.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+	    print_log_n_stderr(true, true, logbuf, logbuf, errno);
+            unlock_pidfile();
+	    return true;
+	}
+
+	pidbuf[b < sizeof(pidbuf) ? b : sizeof(pidbuf) - 1] = '\0';
+	pid = strtol(pidbuf,NULL,0);
+
+	if(pid < 1)
+	{
+	    /** Bad PID */
+	    char* logerr = "PID file read from '%s'. File contents not valid.\n"
+            "If the file is the correct PID file and no other MaxScale processes "
+            "are running, please remove it manually and start MaxScale again.";
+	    snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+	    print_log_n_stderr(true, true, logbuf, logbuf, errno);
+            unlock_pidfile();
+	    return true;
+	}
+
+	if(kill(pid,0) == -1)
+	{
+	    if(errno == ESRCH)
+	    {
+		/** no such process, old PID file */
+                if(lock_failed)
+                {
+                    char* logerr = "Locking the PID file '%s' failed. Read PID from file and no process found with PID %d. "
+                    "Confirm that no other process holds the lock on the PID file.";
+                    snprintf(logbuf,sizeof(logbuf),logerr,pathbuf,pid);
+                    print_log_n_stderr(true, true, logbuf, logbuf, 0);
+                    close(fd);
+                }
+		return lock_failed;
+	    }
+	    else
+	    {
+		char* logerr = "Failed to check the existence of process %d read from file '%s'";
+		snprintf(logbuf,sizeof(logbuf),logerr,pid,pathbuf);
+		print_log_n_stderr(true, true, logbuf, logbuf, errno);
+                unlock_pidfile();
+	    }
+	}
+	else
+	{
+	    char* logerr = "MaxScale is already running. Process id: %d. "
+            "Use another location for the PID file to run multiple instances of MaxScale on the same machine.";
+	    snprintf(logbuf,sizeof(logbuf),logerr,pid);
+	    print_log_n_stderr(true, true, logbuf, logbuf, 0);
+            unlock_pidfile();
+	}
+    }
+    else
+    {
+	char* logerr = "Cannot open PID file '%s', no read permissions. "
+        "Please confirm that the user running MaxScale has read permissions on the file.";
+	snprintf(logbuf,sizeof(logbuf),logerr,pathbuf);
+        print_log_n_stderr(true, true, logbuf, logbuf, errno);
+    }
+    return true;
 }
 
 /** 
@@ -2001,33 +2272,58 @@ static void unlink_pidfile(void)
  */
 
 static int write_pid_file() {
-
-	int fd = -1;
+        char logbuf[STRING_BUFFER_SIZE + PATH_MAX];
+        char pidstr[STRING_BUFFER_SIZE];
 
         snprintf(pidfile, PATH_MAX, "%s/maxscale.pid",get_piddir());
 
-        fd = open(pidfile, O_WRONLY | O_CREAT | O_TRUNC, 0777);
-        if (fd == -1) {
-                fprintf(stderr, "MaxScale failed to open pidFile %s: error %d, %s\n", pidfile, errno, strerror(errno));
-		return 1;
-        } else {
-                char pidstr[50]="";
-		/* truncate pidfile content */
-                if (ftruncate(fd, 0) == -1) {
-                        fprintf(stderr, "MaxScale failed to truncate pidfile %s: error %d, %s\n", pidfile, errno, strerror(errno));
+        if(pidfd == PIDFD_CLOSED)
+        {
+            int fd = -1;
+
+            fd = open(pidfile, O_WRONLY | O_CREAT, 0777);
+            if (fd == -1) {
+                char* logerr = "Failed to open PID file '%s'.";
+                snprintf(logbuf,sizeof(logbuf),logerr,pidfile);
+                print_log_n_stderr(true, true, logbuf, logbuf, errno);
+                return -1;
+            }
+
+            if(flock(fd,LOCK_EX|LOCK_NB))
+            {
+                if(errno == EWOULDBLOCK)
+                {
+                    snprintf(logbuf,sizeof(logbuf),"Failed to lock PID file '%s', another process is holding a lock on it. "
+                            "Please confirm that no other MaxScale process is using the same PID file location.",pidfile);
                 }
-
-                snprintf(pidstr, sizeof(pidstr)-1, "%d", getpid());
-
-                if (pwrite(fd, pidstr, strlen(pidstr), 0) != (ssize_t)strlen(pidstr)) {
-                        fprintf(stderr, "MaxScale failed to write into pidfile %s: error %d, %s\n", pidfile, errno, strerror(errno));
-			/* close file and return */
-                	close(fd);
-			return 1;
+                else
+                {
+                    snprintf(logbuf,sizeof(logbuf),"Failed to lock PID file '%s'.",pidfile);
                 }
-
-		/* close file */
+                print_log_n_stderr(true, true, logbuf, logbuf, errno);
                 close(fd);
+                return -1;
+            }
+            pidfd = fd;
+        }
+
+        /* truncate pidfile content */
+        if (ftruncate(pidfd, 0)) {
+            char* logerr = "MaxScale failed to truncate PID file '%s'.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pidfile);
+            print_log_n_stderr(true, true, logbuf, logbuf, errno);
+            unlock_pidfile();
+            return -1;
+        }
+
+        snprintf(pidstr, sizeof(pidstr)-1, "%d", getpid());
+
+        if (pwrite(pidfd, pidstr, strlen(pidstr), 0) != (ssize_t)strlen(pidstr)) {
+            char* logerr = "MaxScale failed to write into PID file '%s'.";
+            snprintf(logbuf,sizeof(logbuf),logerr,pidfile);
+            print_log_n_stderr(true, true, logbuf, logbuf, errno);
+            unlock_pidfile();
+            return -1;
         }
 
 	/* success */
@@ -2073,6 +2369,21 @@ bool handle_path_arg(char** dest, char* path, char* arg, bool rd, bool wr)
 	}
 
 	return rval;
+}
+
+void set_log_augmentation(const char* value)
+{
+    // Command line arguments are handled first, thus command line argument
+    // has priority.
+
+    static bool augmentation_set = false;
+
+    if (!augmentation_set)
+    {
+        skygw_log_set_augmentation(atoi(value));
+
+        augmentation_set = true;
+    }
 }
 
 /**
@@ -2139,7 +2450,8 @@ static int cnf_preparser(void* data, const char* section, const char* name, cons
 	    {
 		if(handle_path_arg(&tmp,(char*)value,NULL,true,false))
 		{
-		    sprintf(datadir,"%s",tmp);
+		    snprintf(datadir,PATH_MAX,"%s",tmp);
+		    datadir[PATH_MAX] = '\0';
 		    set_datadir(tmp);
 		    datadir_defined = true;
 		}
@@ -2185,6 +2497,10 @@ static int cnf_preparser(void* data, const char* section, const char* name, cons
 	{
 	    cnf->maxlog = config_truth_value((char*)value);
 	}
+        else if(strcmp(name, "log_augmentation") == 0)
+        {
+            set_log_augmentation(value);
+        }
     }
 
     return 1;
@@ -2199,32 +2515,36 @@ static int set_user(char* user)
     pwname = getpwnam(user);
     if(pwname == NULL)
     {
+        char errbuf[STRERROR_BUFLEN];
 	printf("Error: Failed to retrieve user information for '%s': %d %s\n",
-	 user,errno,errno == 0 ? "User not found" : strerror(errno));
+               user,errno,errno == 0 ? "User not found" : strerror_r(errno, errbuf, sizeof(errbuf)));
 	return -1;
     }
     
     rval = setgid(pwname->pw_gid);
     if(rval != 0)
     {
+        char errbuf[STRERROR_BUFLEN];
 	printf("Error: Failed to change group to '%d': %d %s\n",
-	 pwname->pw_gid,errno,strerror(errno));
+               pwname->pw_gid, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 	return rval;
     }
 
     rval = setuid(pwname->pw_uid);
     if(rval != 0)
     {
+        char errbuf[STRERROR_BUFLEN];
 	printf("Error: Failed to change user to '%s': %d %s\n",
-	 pwname->pw_name,errno,strerror(errno));
+               pwname->pw_name, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 	return rval;
     }
     if(prctl(PR_GET_DUMPABLE) == 0)
     {
 	if(prctl(PR_SET_DUMPABLE ,1) == -1)
 	{
+            char errbuf[STRERROR_BUFLEN];
 	    printf("Error: Failed to set dumpable flag on for the process '%s': %d %s\n",
-	     pwname->pw_name,errno,strerror(errno));
+                   pwname->pw_name, errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 	    return -1;
 	}
     }
@@ -2237,5 +2557,17 @@ static int set_user(char* user)
 
 
     return rval;
+}
+
+/**
+ * Write the exit status of the child process to the parent process.
+ * @param fd File descriptor to write to
+ * @param code Exit status of the child process
+ */
+void write_child_exit_code(int fd, int code)
+{
+    /** Notify the parent process that an error has occurred */
+    write(fd, &code, sizeof (int));
+    close(fd);
 }
 

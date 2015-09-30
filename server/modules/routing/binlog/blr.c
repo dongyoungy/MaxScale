@@ -640,10 +640,12 @@ ROUTER_SLAVE	 *slave = (ROUTER_SLAVE *)router_session;
 		LOGIF(LM, (skygw_log_write_flush(
 			LOGFILE_MESSAGE,
 			"%s: Slave %s, server id %d, disconnected after %ld seconds. "
-			"%d events sent, %lu bytes.",
+			"%d SQL commands, %d events sent (%lu bytes).",
 			router->service->name, slave->dcb->remote,
 			slave->serverid,
-			time(0) - slave->connect_time, slave->stats.n_events,
+			time(0) - slave->connect_time,
+			slave->stats.n_queries,
+			slave->stats.n_events,
 			slave->stats.n_bytes)));
 
 		/*
@@ -852,7 +854,8 @@ struct tm	tm;
 
 	if (router_inst->lastEventTimestamp)
 	{
-		localtime_r((const time_t*)&router_inst->lastEventTimestamp, &tm);
+		time_t	last_event = (time_t)router_inst->lastEventTimestamp;
+		localtime_r(&last_event, &tm);
 		asctime_r(&tm, buf);
 		dcb_printf(dcb, "\tLast binlog event timestamp:  			%ld (%s)\n",
 				router_inst->lastEventTimestamp, buf);
@@ -980,7 +983,8 @@ struct tm	tm;
 			if (session->lastEventTimestamp
 					&& router_inst->lastEventTimestamp)
 			{
-				localtime_r((const time_t*)&session->lastEventTimestamp, &tm);
+				time_t	session_last_event = (time_t)session->lastEventTimestamp;
+				localtime_r(&session_last_event, &tm);
 				asctime_r(&tm, buf);
 				dcb_printf(dcb, "\t\tLast binlog event timestamp			%u, %s", session->lastEventTimestamp, buf);
 				dcb_printf(dcb, "\t\tSeconds behind master				%u\n", router_inst->lastEventTimestamp - session->lastEventTimestamp);
@@ -1053,7 +1057,8 @@ int	len;
 		return NULL;
 	memcpy(rval, (char *)(errpkt->start) + 7, 6);
 	rval[6] = ' ';
-	memcpy(&rval[7], (char *)(errpkt->start) + 13, len - 8);
+	/* message size is len - (1 byte field count + 2 bytes errno + 6 bytes status) */
+	memcpy(&rval[7], (char *)(errpkt->start) + 13, len - 9);
 	rval[len-2] = 0;
 	return rval;
 }
@@ -1080,7 +1085,7 @@ errorReply(ROUTER *instance, void *router_session, GWBUF *message, DCB *backend_
 ROUTER_INSTANCE	*router = (ROUTER_INSTANCE *)instance;
 int		error;
 socklen_t len;
-char		msg[85], *errmsg;
+char		msg[STRERROR_BUFLEN + 1], *errmsg;
 
 	if (action == ERRACT_RESET)
 	{
@@ -1103,8 +1108,8 @@ char		msg[85], *errmsg;
 	len = sizeof(error);
 	if (router->master && getsockopt(router->master->fd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 && error != 0)
 	{
-		strerror_r(error, msg, 80);
-		strcat(msg, " ");
+                char errbuf[STRERROR_BUFLEN];
+                sprintf(msg, "%s ", strerror_r(error, errbuf, sizeof(errbuf)));
 	}
 	else
 		strcpy(msg, "");
