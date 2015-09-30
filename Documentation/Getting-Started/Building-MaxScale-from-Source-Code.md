@@ -12,6 +12,10 @@ You will need a number of tools and libraries in order to achieve this.
 
 * libedit 2.11 or later (used by the MaxAdmin tool)
 
+* BISON
+
+* FLEX
+
 # Obtaining MariaDB packages
 
 MaxScale requires the server and the development packages for the MariaDB server. Either the 10.0 or the 5.5 version of the MariaDB server can be used. You can obtain these by following the instructions on the MariaDB.org site: [https://downloads.mariadb.org/](https://downloads.mariadb.org/)
@@ -28,7 +32,7 @@ You will need to install all of the following packages for all versions of RHEL 
 
 ```
 gcc gcc-c++ ncurses-devel bison glibc-devel cmake libgcc perl make libtool \
-    openssl-devel libaio libaio-devel librabbitmq-devel libcurl-devel pcre-devel
+    openssl-devel libaio libaio-devel librabbitmq-devel libcurl-devel pcre-devel bison flex
 ```
 
 In addition, if you wish to to build an RPM package include:
@@ -62,7 +66,7 @@ These packages are required on all versions of Ubuntu and Debian.
 
 ```
 	build-essential libssl-dev libaio-dev ncurses-dev bison \
-	cmake perl libtool librabbitmq-dev libcurl-dev libpcre3-dev
+	cmake perl libtool librabbitmq-dev libcurl-dev libpcre3-dev bison flex
 ```
 
 If you want to build a DEB package, you will also need:

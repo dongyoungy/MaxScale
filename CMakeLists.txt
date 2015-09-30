@@ -42,7 +42,6 @@ find_package(FLEX)
 find_package(BISON)
 find_package(Git)
 find_package(CURL) 
-
 # You can find the variables set by this in the FindCURL.cmake file
 # which is a default module in CMake.
 
@@ -170,7 +169,6 @@ include_directories(server/modules/include)
 include_directories(${CMAKE_BINARY_DIR}/server/include)
 include_directories(${CURL_INCLUDE_DIRS})
 
-add_subdirectory(parser)
 add_subdirectory(plugins)
 add_subdirectory(utils)
 add_subdirectory(log_manager)
