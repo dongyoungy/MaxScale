@@ -1,4 +1,23 @@
 %{
+
+/*
+ * This file is distributed as part of the MariaDB Corporation MaxScale.  It is free
+ * software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation,
+ * version 2.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program; if not, write to the Free Software Foundation, Inc., 51
+ * Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Copyright MariaDB Corporation Ab 2015
+ */
+
 #include <parser.h>
 struct parser_token_t* create_token(int type, char* val);
 struct parser_token_t* alloc_token();
@@ -18,9 +37,7 @@ sq_str 		['][^']+[']
 dq_str 		["][^"]+["]
 float		{num}+[.]{num}+
 posix	    [a-zA-Z0-9._-]
-keyvalue1	{posix}+=['][^']+[']
-keyvalue2	{posix}+=["][^"]+["]
-keyvalue3	{posix}+={posix}+
+keyval	    ({sq_str})|({dq_str})|({posix}+)
 beginparen  [(]
 endparen    [)]
 %%
@@ -48,17 +65,7 @@ endparen    [)]
             link_tokens(yyextra,tok);
             }
 
-{keyvalue1}	{
-            struct parser_token_t* tok = create_token(PARSER_PAIR,yytext);
-            link_tokens(yyextra,tok);
-            }
-
-{keyvalue2}	{
-            struct parser_token_t* tok = create_token(PARSER_PAIR,yytext);
-            link_tokens(yyextra,tok);
-            }
-
-{keyvalue3}	{
+{keyval}={keyval}	{
             struct parser_token_t* tok = create_token(PARSER_PAIR,yytext);
             link_tokens(yyextra,tok);
             }
