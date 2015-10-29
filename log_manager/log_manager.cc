@@ -288,32 +288,17 @@ static void logmanager_unregister(void);
 static bool logmanager_init_nomutex(int argc, char* argv[]);
 static void logmanager_done_nomutex(void);
 
-enum log_spread_down
-{
-    LOG_SPREAD_DOWN_NO = 0,
-    LOG_SPREAD_DOWN_YES = 1
-};
-
-enum log_use_valist
-{
-    LOG_USE_VALIST_NO = 0,
-    LOG_USE_VALIST_YES = 1
-};
-
 enum log_rotate
 {
     LOG_ROTATE_NO = 0,
     LOG_ROTATE_YES = 1
 };
 
-static int logmanager_write_log(logfile_id_t         id,
-                                enum log_flush       flush,
-                                enum log_use_valist  use_valist,
-                                enum log_spread_down spread_down,
-                                enum log_rotate      rotate,
-                                size_t               len,
-                                const char*          str,
-                                va_list              valist);
+static int logmanager_write_log(logfile_id_t    id,
+                                enum log_flush  flush,
+                                enum log_rotate rotate,
+                                size_t          len,
+                                const char*     str);
 
 static blockbuf_t* blockbuf_init(logfile_id_t id);
 static void blockbuf_node_done(void* bb_data);
@@ -647,27 +632,19 @@ static logfile_t* logmanager_get_logfile(logmanager_t* lmgr, logfile_id_t  id)
  * @param id            logfile object identifier
  * @param flush         indicates whether log string must be written to disk
  *                      immediately
- * @param use_valist    does write involve formatting of the string and use of
- *                      valist argument
- * @param spread_down   if true, log string is spread to all logs having
- *                      larger id
  * @param rotate        if set, closes currently open log file and opens a
  *                      new one
- * @param str_len       length of formatted string
+ * @param str_len       length of formatted string (including terminating NULL).
  * @param str           string to be written to log
- * @param valist        variable-length argument list for formatting the string
  *
  * @return 0 if succeed, -1 otherwise
  *
  */
-static int logmanager_write_log(logfile_id_t         id,
-                                enum log_flush       flush,
-                                enum log_use_valist  use_valist,
-                                enum log_spread_down spread_down,
-                                enum log_rotate      rotate,
-                                size_t               str_len,
-                                const char*          str,
-                                va_list              valist)
+static int logmanager_write_log(logfile_id_t    id,
+                                enum log_flush  flush,
+                                enum log_rotate rotate,
+                                size_t          str_len,
+                                const char*     str)
 {
     logfile_t*   lf;
     char*        wp;
@@ -687,12 +664,9 @@ static int logmanager_write_log(logfile_id_t         id,
          */
         err = logmanager_write_log(LOGFILE_ERROR,
                                    LOG_FLUSH_YES,
-                                   LOG_USE_VALIST_NO,
-                                   LOG_SPREAD_DOWN_NO,
                                    LOG_ROTATE_NO,
                                    strlen(errstr) + 1,
-                                   errstr,
-                                   valist);
+                                   errstr);
         if (err != 0)
         {
             fprintf(stderr,
@@ -837,20 +811,10 @@ static int logmanager_write_log(logfile_id_t         id,
          * Write next string to overwrite terminating null character
          * of the timestamp string.
          */
-        if (use_valist)
-        {
-            vsnprintf(wp + timestamp_len + sesid_str_len,
-                      safe_str_len - timestamp_len - sesid_str_len,
-                      str,
-                      valist);
-        }
-        else
-        {
-            snprintf(wp + timestamp_len + sesid_str_len,
-                     safe_str_len-timestamp_len-sesid_str_len,
-                     "%s",
-                     str);
-        }
+        snprintf(wp + timestamp_len + sesid_str_len,
+                 safe_str_len-timestamp_len-sesid_str_len,
+                 "%s",
+                 str);
 
         /** Add an ellipsis to an overflowing message to signal truncation. */
         if (overflow && safe_str_len > 4)
@@ -889,61 +853,6 @@ static int logmanager_write_log(logfile_id_t         id,
         {
             free(wp);
         }
-        /**
-         * disabled because cross-blockbuffer locking either causes deadlock
-         * or run out of memory blocks.
-         */
-        if (spread_down && false)
-        {
-            /**
-             * Write to target log. If spread_down == true, then
-             * write also to all logs with greater logfile id.
-             * LOGFILE_ERROR   = 1,
-             * LOGFILE_MESSAGE = 2,
-             * LOGFILE_TRACE   = 4,
-             * LOGFILE_DEBUG   = 8
-             *
-             * So everything written to error log will appear in
-             * message, trace and debuglog. Messages will be
-             * written in trace and debug log.
-             */
-            for (i = (id << 1); i <= LOGFILE_LAST; i <<= 1)
-            {
-                /** pointer to write buffer of larger-id log */
-                char* wp_c;
-
-                /**< Check if particular log is enabled */
-                if (!(lm->lm_enabled_logfiles & i))
-                {
-                    continue;
-                }
-                /**
-                 * Seek write position and register to block
-                 * buffer. Then print formatted string to
-                 * write position.
-                 */
-                wp_c = blockbuf_get_writepos(&bb_c,
-                                             (logfile_id_t)i,
-                                             timestamp_len - 1 + str_len,
-                                             flush);
-                /**
-                 * Copy original string from block buffer to
-                 * other logs' block buffers.
-                 */
-                snprintf(wp_c, timestamp_len + str_len, "%s", wp);
-
-                /** remove double line feed */
-                if (wp_c[timestamp_len - 1 + str_len - 2] == '\n')
-                {
-                    wp_c[timestamp_len - 1 + str_len - 2] = ' ';
-                }
-                wp_c[timestamp_len - 1 + str_len - 1] = '\n';
-
-                /** lock-free unregistration, includes flush if
-                 * bb_state == BB_FULL */
-                blockbuf_unregister(bb_c);
-            }
-        } /* if (spread_down) */
     } /* if (str == NULL) */
 
 return_err:
@@ -1361,7 +1270,6 @@ return_err:
 static bool logfile_set_enabled(logfile_id_t id, bool val)
 {
     char*        logstr;
-    va_list      notused;
     bool         oldval;
     bool         succp = false;
     int          err = 0;
@@ -1377,12 +1285,9 @@ static bool logfile_set_enabled(logfile_id_t id, bool val)
          */
         err = logmanager_write_log(LOGFILE_ERROR,
                                    LOG_FLUSH_YES,
-                                   LOG_USE_VALIST_NO,
-                                   LOG_SPREAD_DOWN_NO,
                                    LOG_ROTATE_NO,
                                    strlen(errstr) + 1,
-                                   errstr,
-                                   notused);
+                                   errstr);
         if (err != 0)
         {
             fprintf(stderr,
@@ -1409,12 +1314,9 @@ static bool logfile_set_enabled(logfile_id_t id, bool val)
         lf->lf_enabled = val;
         err = logmanager_write_log(id,
                                    LOG_FLUSH_YES,
-                                   LOG_USE_VALIST_NO,
-                                   LOG_SPREAD_DOWN_NO,
                                    LOG_ROTATE_NO,
                                    strlen(logstr) + 1,
-                                   logstr,
-                                   notused);
+                                   logstr);
         free(logstr);
     }
     if (err != 0)
@@ -1448,7 +1350,8 @@ int skygw_log_get_augmentation()
  * @param file       The name of the file where the logging was made.
  * @param int        The line where the logging was made.
  * @param function   The function where the logging was made.
- * @param str        String or printf format string.
+ * @param len        Length of str, including terminating NULL.
+ * @param str        String
  * @param flush      Whether the message should be flushed.
  *
  * @return 0 if the logging to at least one log succeeded.
@@ -1468,49 +1371,8 @@ static int log_write(logfile_id_t   id,
     {
         CHK_LOGMANAGER(lm);
 
-        const char* format;
-
-        if (log_augmentation == LOG_AUGMENT_WITH_FUNCTION)
-        {
-            static const char function_format[] = "%s [%s]";
-
-            format = function_format;
-
-            len += sizeof(function_format); // A little bit more than needed, but won't hurt.
-            assert(function);
-            len += strlen(function);
-        }
-        else
-        {
-            static const char default_format[] = "%s";
-
-            format = default_format;
-
-            len += sizeof(default_format);  // A little bit more than needed, but won't hurt.
-        }
-
-        len += 1; // For the trailing NULL.
-
-        char message[len];
-
-        if (log_augmentation == LOG_AUGMENT_WITH_FUNCTION)
-        {
-            len = snprintf(message, sizeof(message), format, str, function);
-        }
-        else
-        {
-            len = snprintf(message, sizeof(message), format, str);
-        }
-
-        assert(len >= 0);
-
         int attempts = 0;
         int successes = 0;
-
-        /**
-         * Add one for line feed.
-         */
-        len += sizeof(char);
 
         for (int i = LOGFILE_FIRST; i <= LOGFILE_LAST; i <<= 1)
         {
@@ -1522,14 +1384,10 @@ static int log_write(logfile_id_t   id,
             {
                 ++attempts;
 
-                va_list valist; // Not used
-
                 if (logmanager_write_log((logfile_id_t)i,
                                          flush,
-                                         LOG_USE_VALIST_NO,
-                                         LOG_SPREAD_DOWN_YES,
                                          LOG_ROTATE_NO,
-                                         len, message, valist) == 0)
+                                         len, str) == 0)
                 {
                     ++successes;
                 }
@@ -1567,23 +1425,63 @@ int skygw_log_write_context(logfile_id_t   id,
      * Find out the length of log string (to be formatted str).
      */
     va_start(valist, str);
-    int len = vsnprintf(NULL, 0, str, valist);
+    int message_len = vsnprintf(NULL, 0, str, valist);
     va_end(valist);
 
-    if (len >= 0)
+    if (message_len >= 0)
     {
-        if (len > MAX_LOGSTRLEN)
+        static const char FORMAT_FUNCTION[] = "(%s): ";
+
+        int augmentation_len = 0;
+
+        switch (log_augmentation)
         {
-            len = MAX_LOGSTRLEN;
+        case LOG_AUGMENT_WITH_FUNCTION:
+            augmentation_len = sizeof(FORMAT_FUNCTION) - 1; // Remove trailing 0
+            augmentation_len -= 2; // Remove the %s
+            augmentation_len += strlen(function);
+            break;
+
+        default:
+            break;
         }
 
-        char message[len + 1];
+        int buffer_len = augmentation_len + message_len + 1; // Trailing NULL
+
+        if (buffer_len > MAX_LOGSTRLEN)
+        {
+            message_len -= (buffer_len - MAX_LOGSTRLEN);
+            buffer_len = MAX_LOGSTRLEN;
+
+            assert(augmentation_len + message_len + 1 == buffer_len);
+        }
+
+        char buffer[buffer_len];
+        char *message = buffer + augmentation_len;
+
+        if (augmentation_len)
+        {
+            char *augmentation = buffer;
+            int len = 0;
+
+            switch (log_augmentation)
+            {
+            case LOG_AUGMENT_WITH_FUNCTION:
+                len = sprintf(augmentation, FORMAT_FUNCTION, function);
+                break;
+
+            default:
+                assert(!true);
+            }
+
+            assert(len == augmentation_len);
+        }
 
         va_start(valist, str);
-        vsnprintf(message, sizeof(message), str, valist);
+        vsnprintf(message, message_len + 1, str, valist);
         va_end(valist);
 
-        err = log_write(id, file, line, function, len, message, flush);
+        err = log_write(id, file, line, function, buffer_len, buffer, flush);
 
         if (err != 0)
         {
@@ -1598,7 +1496,6 @@ int skygw_log_write_context(logfile_id_t   id,
 int skygw_log_flush(logfile_id_t id)
 {
     int err = 0;
-    va_list valist; /**< Dummy, must be present but it is not processed */
 
     if (!logmanager_register(false))
     {
@@ -1609,10 +1506,8 @@ int skygw_log_flush(logfile_id_t id)
     CHK_LOGMANAGER(lm);
     err = logmanager_write_log(id,
                                LOG_FLUSH_YES,
-                               LOG_USE_VALIST_NO,
-                               LOG_SPREAD_DOWN_NO,
                                LOG_ROTATE_NO,
-                               0, NULL, valist);
+                               0, NULL);
 
     if (err != 0)
     {
@@ -1634,7 +1529,6 @@ int skygw_log_rotate(logfile_id_t id)
 {
     int        err = 0;
     logfile_t* lf;
-    va_list    valist; /**< Dummy, must be present but it is not processed */
 
     if (!logmanager_register(false))
     {
@@ -1650,10 +1544,8 @@ int skygw_log_rotate(logfile_id_t id)
 
     err = logmanager_write_log(id,
                                LOG_FLUSH_NO,
-                               LOG_USE_VALIST_NO,
-                               LOG_SPREAD_DOWN_NO,
                                LOG_ROTATE_YES,
-                               0, NULL, valist);
+                               0, NULL);
 
     if (err != 0)
     {
