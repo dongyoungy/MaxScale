@@ -1,6 +1,6 @@
 # Binlogrouter
 
-The binlogrouter is a replication protocol proxy module for MaxScale. This module allows MaxScale to connect to a master server and retrieve binary logs while slave servers can connect to MaxScale like they would connect to a normal master server.
+The binlogrouter is a replication protocol proxy module for MaxScale. This module allows MaxScale to connect to a master server and retrieve binary logs while slave servers can connect to MaxScale like they would connect to a normal master server. If the master server goes down, the slave servers can still connect to MaxScale and read binary logs. You can switch to a new master server without the slaves noticing that the actual master server has changed. This allows for a more highly available replication setup where replication is high-priority.
 
 # Configuration
 
