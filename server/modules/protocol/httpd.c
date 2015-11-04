@@ -140,7 +140,6 @@ char buf[HTTPD_REQUESTLINE_MAXLEN-1] = "";
 char *query_string = NULL;
 char method[HTTPD_METHOD_MAXLEN-1] = "";
 char url[HTTPD_SMALL_BUFFER] = "";
-int cgi = 0;
 size_t i, j;
 int headers_read = 0;
 HTTPD_session *client_data = NULL;
@@ -170,9 +169,6 @@ GWBUF	*uri;
 		return 0;
 	}
 
-	if (strcasecmp(method, "POST") == 0)
-		cgi = 1;
-
 	i = 0;
 
 	while ( (j < sizeof(buf)) && ISspace(buf[j])) {
@@ -195,7 +191,7 @@ GWBUF	*uri;
 		while ((*query_string != '?') && (*query_string != '\0'))
 			query_string++;
 		if (*query_string == '?') {
-			cgi = 1;
+
 			*query_string = '\0';
 			query_string++;
 		}
@@ -421,7 +417,10 @@ int			syseno = 0;
                    sizeof(one));
 
 	if(syseno != 0){
-		skygw_log_write_flush(LOGFILE_ERROR,"Error: Failed to set socket options. Error %d: %s",errno,strerror(errno));
+                char errbuf[STRERROR_BUFLEN];
+		skygw_log_write_flush(LOGFILE_ERROR,
+                                      "Error: Failed to set socket options. Error %d: %s",
+                                      errno, strerror_r(errno, errbuf, sizeof(errbuf)));
 		return 0;
 	}
         /* set NONBLOCKING mode */
@@ -440,10 +439,11 @@ int			syseno = 0;
         } else {
             int eno = errno;
             errno = 0;
+            char errbuf[STRERROR_BUFLEN];
             fprintf(stderr,
                     "\n* Failed to start listening http due error %d, %s\n\n",
                     eno,
-                    strerror(eno));
+                    strerror_r(eno, errbuf, sizeof(errbuf)));
             return 0;
         }
 

@@ -34,3 +34,20 @@ depend.mk
 
 # Vi swap files
 .*.swp
+/build/
+
+# Reviewboard configuration file
+*.reviewboardrc
+
+# Netbeans Project files
+nbproject/
+
+# CMake directories
+build/
+CMakeFiles/*
+*/CMakeFiles/*
+*/*/CMakeFiles/*
+*/*/*/CMakeFiles/*
+*/*/*/*/CMakeFiles/*
+*.cmake
+Makefile

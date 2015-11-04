@@ -150,6 +150,7 @@ typedef struct mysql_sescmd_st {
         unsigned char      reply_cmd; /*< The reply command. One of OK, ERR, RESULTSET or
                                        *  LOCAL_INFILE. Slave servers are compared to this
                                        *  when they return session command replies.*/
+        int      position; /*< Position of this command */
 #if defined(SS_DEBUG)
         skygw_chk_t        my_sescmd_chk_tail;
 #endif
@@ -184,6 +185,7 @@ typedef struct sescmd_cursor_st {
 	rses_property_t**  scmd_cur_ptr_property; /*< address of pointer to owner property */
 	mysql_sescmd_t*    scmd_cur_cmd;          /*< pointer to current session command */
 	bool               scmd_cur_active;       /*< true if command is being executed */
+        int      position; /*< Position of this cursor */
 #if defined(SS_DEBUG)
 	skygw_chk_t        scmd_cur_chk_tail;
 #endif
@@ -240,16 +242,17 @@ typedef struct backend_ref_st {
 #endif
 } backend_ref_t;
 
-
-typedef struct rwsplit_config_st {
-        int               rw_max_slave_conn_percent;
-        int               rw_max_slave_conn_count;
-        select_criteria_t rw_slave_select_criteria;
-        int               rw_max_slave_replication_lag;
-	target_t          rw_use_sql_variables_in;
-        int               rw_max_sescmd_history_size;
+typedef struct rwsplit_config_st
+{
+    int rw_max_slave_conn_percent;
+    int rw_max_slave_conn_count;
+    select_criteria_t rw_slave_select_criteria;
+    int rw_max_slave_replication_lag;
+    target_t rw_use_sql_variables_in;
+    int rw_max_sescmd_history_size;
+    bool rw_disable_sescmd_hist;
+    bool rw_master_reads; /*< Use master for reads */
 } rwsplit_config_t;
-     
 
 #if defined(PREP_STMT_CACHING)
 
@@ -291,6 +294,7 @@ struct router_client_session {
         bool             rses_autocommit_enabled;
         bool             rses_transaction_active;
         DCB* client_dcb;
+        int             pos_generator;
 #if defined(PREP_STMT_CACHING)
         HASHTABLE*       rses_prep_stmt[2];
 #endif

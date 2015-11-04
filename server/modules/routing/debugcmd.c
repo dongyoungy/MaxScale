@@ -43,6 +43,7 @@
  * 29/05/14	Mark Riddoch		Add Filter support
  * 16/10/14	Mark Riddoch		Add show eventq
  * 05/03/15	Massimiliano Pinto	Added enable/disable feedback
+ * 27/05/15 Martin Brampton     Add show persistent [server]
  *
  * @endverbatim
  */
@@ -154,6 +155,10 @@ struct subcommand showoptions[] = {
 			"Show the monitors that are configured",
 			"Show the monitors that are configured",
 				{0, 0, 0} },
+	{ "persistent",	1, dprintPersistentDCBs,
+			"Show persistent pool for a named server, e.g. show persistent dbnode1",
+			"Show persistent pool for a server, e.g. show persistent 0x485390. The address may also be replaced with the server name from the configuration file",
+				{ARG_TYPE_SERVER, 0, 0} },
 	{ "server",	1, dprintServer,
 			"Show details for a named server, e.g. show server dbnode1",
 			"Show details for a server, e.g. show server 0x485390. The address may also be repalced with the server name from the configuration file",
@@ -1459,7 +1464,7 @@ static void fail_accept(
 {
         int failcount = MIN(atoi(arg2), 100);
         fail_accept_errno = atoi(arg1);
-
+        char errbuf[STRERROR_BUFLEN];
 
         switch(fail_accept_errno) {
                 case EAGAIN:
@@ -1481,7 +1486,7 @@ static void fail_accept(
                         dcb_printf(dcb,
                                    "[%d, %s] is not valid errno for accept.\n",
                                    fail_accept_errno,
-                                   strerror(fail_accept_errno));
+                                   strerror_r(fail_accept_errno, errbuf, sizeof(errbuf)));
                 return ;
         }
 }

@@ -50,6 +50,7 @@
 #include <sys/time.h>
 #include <regex.h>
 #include <string.h>
+#include <atomic.h>
 
 /** Defined in log_manager.cc */
 extern int            lm_enabled_logfiles_bitmask;
@@ -95,7 +96,7 @@ static FILTER_OBJECT MyObject = {
  * are logged.
  *
  * To this base a session number is attached such that each session will
- * have a nique name.
+ * have a unique name.
  */
 typedef struct {
 	int	sessions;	/* The count of sessions */
@@ -276,12 +277,13 @@ char		*remote, *userName;
 			(char *)malloc(strlen(my_instance->filebase) + 20))
 						== NULL)
 		{
+                        char errbuf[STRERROR_BUFLEN];
 			LOGIF(LE, (skygw_log_write(
 				LOGFILE_ERROR,
 			      "Error : Memory allocation for qla filter "
 			      "file name failed due to %d, %s.",
 			      errno,
-			      strerror(errno))));
+                                strerror_r(errno, errbuf, sizeof(errbuf)))));
 			free(my_session);
 			return NULL;
 		}
@@ -304,7 +306,9 @@ char		*remote, *userName;
 		sprintf(my_session->filename, "%s.%d", 
 			my_instance->filebase,
 			my_instance->sessions);
-		my_instance->sessions++;
+
+        // Multiple sessions can try to update my_instance->sessions simultaneously
+		atomic_add(&(my_instance->sessions), 1);
 		
 		if (my_session->active)
 		{
@@ -312,12 +316,13 @@ char		*remote, *userName;
 			
 			if (my_session->fp == NULL)
 			{
+                                char errbuf[STRERROR_BUFLEN];
 				LOGIF(LE, (skygw_log_write(
 					LOGFILE_ERROR,
 					"Error : Opening output file for qla "
 					"fileter failed due to %d, %s",
 					errno,
-					strerror(errno))));
+					strerror_r(errno, errbuf, sizeof(errbuf)))));
 				free(my_session->filename);
 				free(my_session);
 				my_session = NULL;
@@ -326,12 +331,13 @@ char		*remote, *userName;
 	}
 	else
 	{
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write(
 			LOGFILE_ERROR,
 			"Error : Memory allocation for qla filter failed due to "
 			"%d, %s.",
 			errno,
-			strerror(errno))));
+			strerror_r(errno, errbuf, sizeof(errbuf)))));
 	}
 	return my_session;
 }

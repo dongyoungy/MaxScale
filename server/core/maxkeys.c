@@ -29,19 +29,52 @@
  */
 #include	<stdio.h>
 #include	<secrets.h>
+#include <skygw_utils.h>
+#include <log_manager.h>
+#include <gwdirs.h>
 
 int main(int argc, char **argv)
 {
-	if (argc != 2)
+    int arg_count = 4;
+    char *home;
+    char *keyfile;
+    char** arg_vector;
+    int rval = 0;
+
+	if (argc < 2)
 	{
-		fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
-		exit(1);
+	    keyfile = "/var/lib/maxscale/";
+	    fprintf(stderr, "Generating .secrets file in /var/lib/maxscale/ ...\n");
 	}
+	else
+	{
+	    keyfile = argv[1];
+	}
+	arg_vector = malloc(sizeof(char*)*(arg_count + 1));
+
+	if(arg_vector == NULL)
+	{
+	    fprintf(stderr,"Error: Memory allocation failed.\n");
+	    return 1;
+	}
+
+	arg_vector[0] = "logmanager";
+	arg_vector[1] = "-j";
+	arg_vector[2] = "/var/log/maxscale/maxkeys";
+	arg_vector[3] = "-o";
+	arg_vector[4] = NULL;
+	skygw_logmanager_init(arg_count,arg_vector);
+	free(arg_vector);
 	
-	if (secrets_writeKeys(argv[1]))
+
+	if (secrets_writeKeys(keyfile))
 	{
 		fprintf(stderr, "Failed to encode the password\n");
-		exit(1);
+		rval = 1;
 	}
-	exit(0);
+
+	skygw_log_sync_all();
+	skygw_logmanager_done();
+
+    return rval;
 }

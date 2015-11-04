@@ -1,3 +1,5 @@
+#ifndef QUERY_CLASSIFIER_HG
+#define QUERY_CLASSIFIER_HG
 /*
 This file is distributed as part of the MariaDB Corporation MaxScale. It is free
 software: you can redistribute it and/or modify it under the terms of the
@@ -72,7 +74,8 @@ typedef enum {
 	QUERY_OP_CREATE_TABLE		= (1 << 7),
 	QUERY_OP_CREATE_INDEX		= (1 << 8),
 	QUERY_OP_DROP_TABLE			= (1 << 9),
-	QUERY_OP_DROP_INDEX			= (1 << 10)
+	QUERY_OP_DROP_INDEX			= (1 << 10),
+        QUERY_OP_CHANGE_DB              = (1 << 11)
 }skygw_query_op_t;
 
 typedef struct parsing_info_st {
@@ -116,3 +119,4 @@ char** skygw_get_database_names(GWBUF* querybuf,int* size);
 
 EXTERN_C_BLOCK_END
 
+#endif

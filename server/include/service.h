@@ -26,7 +26,10 @@
 #include <hashtable.h>
 #include <resultset.h>
 #include <maxconfig.h>
-
+#include <openssl/crypto.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/dh.h>
 /**
  * @file service.h
  *
@@ -76,6 +79,7 @@ typedef struct servprotocol {
  */
 typedef struct {
 	time_t		started;	/**< The time when the service was started */
+        int             n_failed_starts; /**< Number of times this service has failed to start */
 	int		n_sessions;	/**< Number of sessions created on service since start */
 	int		n_current;	/**< Current number of sessions */
 } SERVICE_STATS;
@@ -104,6 +108,32 @@ typedef struct server_ref_t{
         struct server_ref_t *next;
         SERVER* server;
 }SERVER_REF;
+
+typedef enum {
+  SSL_DISABLED,
+  SSL_ENABLED,
+  SSL_REQUIRED
+} ssl_mode_t;
+
+enum{
+  SERVICE_SSLV3,
+  SERVICE_TLS10,
+#ifdef OPENSSL_1_0
+  SERVICE_TLS11,
+  SERVICE_TLS12,
+#endif
+  SERVICE_SSL_MAX,
+  SERVICE_TLS_MAX,
+  SERVICE_SSL_TLS_MAX
+};
+
+#define DEFAULT_SSL_CERT_VERIFY_DEPTH 100 /*< The default certificate verification depth */
+#define SERVICE_MAX_RETRY_INTERVAL 3600 /*< The maximum interval between service start retries */
+/**
+ * Parameters that are automatically detected but can also be configured by the
+ * user are initially set to this value.
+ */
+#define SERVICE_PARAM_UNINIT -1
 
 /**
  * Defines a service within the gateway.
@@ -141,6 +171,7 @@ typedef struct service {
         bool            strip_db_esc;      /*< Remove the '\' characters from database names
                                             * when querying them from the server. MySQL Workbench seems
                                             * to escape at least the underscore character. */
+        bool optimize_wildcard;             /*< Convert wildcard grants to individual database grants */
 	SPINLOCK
 			users_table_spin;	/**< The spinlock for users data refresh */
 	SERVICE_REFRESH_RATE
@@ -148,8 +179,20 @@ typedef struct service {
 	FILTER_DEF	**filters;		/**< Ordered list of filters */
 	int		n_filters;		/**< Number of filters */
         int             conn_timeout;           /*< Session timeout in seconds */
+        ssl_mode_t ssl_mode; /*< one of DISABLED, ENABLED or REQUIRED */
 	char		*weightby;
 	struct service	*next;			/**< The next service in the linked list */
+        SSL_CTX         *ctx;
+        SSL_METHOD      *method;                           /*<  SSLv3 or TLS1.0/1.1/1.2 methods
+                                                           * see: https://www.openssl.org/docs/ssl/SSL_CTX_new.html */
+        int ssl_cert_verify_depth; /*< SSL certificate verification depth */
+        int ssl_method_type; /*< Which of the SSLv3 or TLS1.0/1.1/1.2 methods to use */
+        char* ssl_cert; /*< SSL certificate */
+        char* ssl_key; /*< SSL private key */
+        char* ssl_ca_cert; /*< SSL CA certificate */
+        bool ssl_init_done; /*< If SSL has already been initialized for this service */
+        bool retry_start; /*< If starting of the service should be retried later */
+
 } SERVICE;
 
 typedef enum count_spec_t {COUNT_NONE=0, COUNT_ATLEAST, COUNT_EXACT, COUNT_ATMOST} count_spec_t;
@@ -177,13 +220,20 @@ extern	int	serviceRestart(SERVICE *);
 extern	int	serviceSetUser(SERVICE *, char *, char *);
 extern	int	serviceGetUser(SERVICE *, char **, char **);
 extern	void	serviceSetFilters(SERVICE *, char *);
+extern  int     serviceSetSSL(SERVICE *service, char* action);
+extern  int     serviceInitSSL(SERVICE* service);
+extern  int     serviceSetSSLVersion(SERVICE *service, char* version);
+extern  int     serviceSetSSLVerifyDepth(SERVICE* service, int depth);
+extern  void    serviceSetCertificates(SERVICE *service, char* cert,char* key, char* ca_cert);
 extern	int	serviceEnableRootUser(SERVICE *, int );
 extern	int	serviceSetTimeout(SERVICE *, int );
+extern  void    serviceSetRetryOnFailure(SERVICE *service, char* value);
 extern	void	serviceWeightBy(SERVICE *, char *);
 extern	char	*serviceGetWeightingParameter(SERVICE *);
 extern	int	serviceEnableLocalhostMatchWildcardHost(SERVICE *, int);
 int serviceStripDbEsc(SERVICE* service, int action);
 int serviceAuthAllServers(SERVICE *service, int action);
+int serviceOptimizeWildcard(SERVICE *service, int action);
 extern	void	service_update(SERVICE *, char *, char *, char *);
 extern	int	service_refresh_users(SERVICE *);
 extern	void	printService(SERVICE *);

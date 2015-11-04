@@ -15,10 +15,12 @@
  *
  * Copyright MariaDB Corporation Ab 2013-2014
  */
+ 
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <errno.h>
 #include <poll.h>
@@ -69,8 +71,11 @@ int	max_poll_sleep;
  * 24/09/14	Mark Riddoch	Introduction of the event queue for processing the
  *				incoming events rather than processing them immediately
  *				in the loop after the epoll_wait. This allows for better
- *				thread utilisaiton and fairer scheduling of the event
+ *				thread utilisation and fairer scheduling of the event
  *				processing.
+ * 07/07/15     Martin Brampton Simplified add and remove DCB, improve error handling.
+ * 23/08/15     Martin Brampton Provisionally added test so only DCB with a 
+ *              session link can be added to the poll list
  *
  * @endverbatim
  */
@@ -93,7 +98,7 @@ static	int		process_pollq(int thread_id);
 static	void		poll_add_event_to_dcb(DCB* dcb, GWBUF* buf, __uint32_t ev);
 
 
-DCB		*eventq = NULL;
+DCB			*eventq = NULL;
 SPINLOCK	pollqlock = SPINLOCK_INIT;
 
 /**
@@ -101,13 +106,13 @@ SPINLOCK	pollqlock = SPINLOCK_INIT;
  * poll completion, a value of 1 or less is the ideal.
  */
 static double	load_average = 0.0;
-static int	load_samples = 0;
-static int	load_nfds = 0;
+static int		load_samples = 0;
+static int		load_nfds = 0;
 static double	current_avg = 0.0;
 static double	*avg_samples = NULL;
-static int	*evqp_samples = NULL;
-static int	next_sample = 0;
-static int	n_avg_samples;
+static int		*evqp_samples = NULL;
+static int		next_sample = 0;
+static int		n_avg_samples;
 
 /* Thread statistics data */
 static	int		n_threads;	/*< No. of threads */
@@ -125,9 +130,9 @@ typedef enum { THREAD_STOPPED, THREAD_IDLE,
  */
 typedef	struct {
 	THREAD_STATE	state;	  /*< Current thread state */
-	int		n_fds;	  /*< No. of descriptors thread is processing */
-	DCB		*cur_dcb; /*< Current DCB being processed */
-	uint32_t	event;	  /*< Current event being processed */
+	int				n_fds;	  /*< No. of descriptors thread is processing */
+	DCB				*cur_dcb; /*< Current DCB being processed */
+	uint32_t		event;	  /*< Current event being processed */
 } THREAD_DATA;
 
 static	THREAD_DATA	*thread_data = NULL;	/*< Status of each thread */
@@ -185,6 +190,11 @@ static struct {
  * Periodic function to collect load data for average calculations
  */
 static void	poll_loadav(void *);
+
+/**
+ * Function to analyse error return from epoll_ctl
+ */
+static int poll_resolve_error(DCB *, int, bool);
 
 /**
  * Initialise the polling system we are using for the gateway.
@@ -246,12 +256,12 @@ int	i;
 int
 poll_add_dcb(DCB *dcb)
 {
-        int         rc = -1;
-        dcb_state_t old_state = DCB_STATE_UNDEFINED;
-        dcb_state_t new_state;
-        struct	epoll_event	ev;
+    int         rc = -1;
+    dcb_state_t old_state = dcb->state;
+    dcb_state_t new_state;
+    struct      epoll_event	ev;
 
-        CHK_DCB(dcb);
+    CHK_DCB(dcb);
 
 #ifdef EPOLLRDHUP
 	ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP | EPOLLET;
@@ -260,61 +270,91 @@ poll_add_dcb(DCB *dcb)
 #endif
 	ev.data.ptr = dcb;
 
-        /*<
-         * Choose new state according to the role of dcb.
-         */
-        if (dcb->dcb_role == DCB_ROLE_REQUEST_HANDLER) {
-                new_state = DCB_STATE_POLLING;
-        } else {
-                ss_dassert(dcb->dcb_role == DCB_ROLE_SERVICE_LISTENER);
-                new_state = DCB_STATE_LISTENING;
-        }
-        /*<
-         * If dcb is in unexpected state, state change fails indicating that dcb
-         * is not polling anymore.
-         */
-        if (dcb_set_state(dcb, new_state, &old_state)) {
-                rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, dcb->fd, &ev);
-
-                if (rc != 0) {
-                        int eno = errno;
-                        errno = 0;
-                        LOGIF(LE, (skygw_log_write_flush(
-                                LOGFILE_ERROR,
-                                "Error : Adding dcb %p in state %s "
-                                "to poll set failed. epoll_ctl failed due "
-                                "%d, %s.",
-                                dcb,
-                                STRDCBSTATE(dcb->state),
-                                eno,
-                                strerror(eno))));
-                } else {
-                        LOGIF(LD, (skygw_log_write(
-                                LOGFILE_DEBUG,
-                                "%lu [poll_add_dcb] Added dcb %p in state %s to "
-                                "poll set.",
-                                pthread_self(),
-                                dcb,
-                                STRDCBSTATE(dcb->state))));
-                }
-                ss_info_dassert(rc == 0, "Unable to add poll"); /*< trap in debug */
-        } else {
-                LOGIF(LE, (skygw_log_write_flush(
-                        LOGFILE_ERROR,
-                        "Error : Unable to set new state for dcb %p "
-                        "in state %s. Adding to poll set failed.",
-                        dcb,
-                        STRDCBSTATE(dcb->state))));
-        }
-        
-	return rc; 
+    /*<
+     * Choose new state according to the role of dcb.
+     */
+    spinlock_acquire(&dcb->dcb_initlock);
+    if (dcb->dcb_role == DCB_ROLE_REQUEST_HANDLER) 
+    {
+        new_state = DCB_STATE_POLLING;
+    }
+    else
+    {
+        ss_dassert(dcb->dcb_role == DCB_ROLE_SERVICE_LISTENER);
+        new_state = DCB_STATE_LISTENING;
+    }
+    /*
+     * Check DCB current state seems sensible
+     */
+    if (DCB_STATE_DISCONNECTED == dcb->state
+        || DCB_STATE_ZOMBIE == dcb->state
+        || DCB_STATE_UNDEFINED == dcb->state)
+    {
+        LOGIF(LE, (skygw_log_write_flush(
+            LOGFILE_ERROR,
+            "%lu [poll_add_dcb] Error : existing state of dcb %p "
+            "is %s, but this should be impossible, crashing.",
+            pthread_self(),
+            dcb,
+            STRDCBSTATE(dcb->state))));
+        raise(SIGABRT);
+    }
+    /*
+     * This test could be wrong. On the face of it, we don't want to add a
+     * DCB to the poll list if it is not linked to a session because the code
+     * that handles events will expect to find a session.  Test added by
+     * Martin as an experiment on 23 August 2015
+     */
+    if (false && NULL == dcb->session)
+    {
+        LOGIF(LE, (skygw_log_write_flush(
+            LOGFILE_ERROR,
+            "%lu [%s] Error : Attempt to add dcb %p "
+            "to poll list but it is not linked to a session, crashing.",
+            __func__,
+            pthread_self(),
+            dcb)));
+        raise(SIGABRT);
+    }
+    if (DCB_STATE_POLLING == dcb->state
+        || DCB_STATE_LISTENING == dcb->state)
+    {
+        LOGIF(LE, (skygw_log_write_flush(
+            LOGFILE_ERROR,
+            "%lu [poll_add_dcb] Error : existing state of dcb %p "
+            "is %s, but this is probably an error, not crashing.",
+            pthread_self(),
+            dcb,
+            STRDCBSTATE(dcb->state))));
+    }
+    dcb->state = new_state; 
+    spinlock_release(&dcb->dcb_initlock);
+    /*
+     * The only possible failure that will not cause a crash is
+     * running out of system resources.
+     */
+    rc = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, dcb->fd, &ev);
+    if (rc) 
+    {
+        /* Some errors are actually considered acceptable */
+        rc = poll_resolve_error(dcb, errno, true);
+    }
+    if (0 == rc) 
+    {
+        LOGIF(LD, (skygw_log_write(
+            LOGFILE_DEBUG,
+            "%lu [poll_add_dcb] Added dcb %p in state %s to poll set.",
+            pthread_self(),
+            dcb,
+            STRDCBSTATE(dcb->state))));
+    }
+    else dcb->state = old_state;
+    return rc; 
 }
 
 /**
  * Remove a descriptor from the set of descriptors within the
  * polling environment.
- * The state change command may fail because concurrent threads may call
- * dcb_set_state simultaneously and the conflict is prevented in dcb_set_state.
  *
  * @param dcb	The descriptor to remove
  * @return	-1 on error or 0 on success
@@ -322,61 +362,127 @@ poll_add_dcb(DCB *dcb)
 int
 poll_remove_dcb(DCB *dcb)
 {
-        struct	epoll_event ev;
-        int                 rc = -1;
-        dcb_state_t         old_state = DCB_STATE_UNDEFINED;
-        dcb_state_t         new_state = DCB_STATE_NOPOLLING;
-
+        int                     dcbfd, rc = -1;
+        struct	epoll_event	ev;
         CHK_DCB(dcb);
 
+        spinlock_acquire(&dcb->dcb_initlock);
         /*< It is possible that dcb has already been removed from the set */
-        if (dcb->state != DCB_STATE_POLLING) 
-	{
-                if (dcb->state == DCB_STATE_NOPOLLING ||
-                    dcb->state == DCB_STATE_ZOMBIE)
-                {
-                        rc = 0;
-                }
-                goto return_rc;
+        if (dcb->state == DCB_STATE_NOPOLLING ||
+            dcb->state == DCB_STATE_ZOMBIE)
+        {
+            spinlock_release(&dcb->dcb_initlock);
+            return 0;
         }
+        if (DCB_STATE_POLLING != dcb->state
+            && DCB_STATE_LISTENING != dcb->state)
+        {
+            LOGIF(LE, (skygw_log_write_flush(
+                LOGFILE_ERROR,
+                "%lu [poll_remove_dcb] Error : existing state of dcb %p "
+                "is %s, but this is probably an error, not crashing.",
+                pthread_self(),
+                dcb,
+                STRDCBSTATE(dcb->state))));
+        }
+        /*< Set bit for each maxscale thread. This should be done before
+		 * the state is changed, so as to protect the DCB from premature
+		 * destruction. */
+        bitmask_copy(&dcb->memdata.bitmask, poll_bitmask());
         /*<
          * Set state to NOPOLLING and remove dcb from poll set.
          */
-        if (dcb_set_state(dcb, new_state, &old_state)) 
-	{
-		/**
-		 * Only positive fds can be removed from epoll set.
-		 */		 
-		if (dcb->fd > 0) 
-		{
-			rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, dcb->fd, &ev);
+        dcb->state = DCB_STATE_NOPOLLING;
 
-			if (rc != 0) {
-				int eno = errno;
-				errno = 0;
-				LOGIF(LE, (skygw_log_write_flush(
-					LOGFILE_ERROR,
-					"Error : epoll_ctl failed due %d, %s.",
-					eno,
-					strerror(eno))));
-			}
-			ss_dassert(rc == 0); /*< trap in debug */
-		}
+        /**
+         * Only positive fds can be removed from epoll set.
+         * Cloned DCBs can have a state of DCB_STATE_POLLING but are not in 
+         * the epoll set and do not have a valid file descriptor.  Hence the
+         * only action for them is already done - the change of state to 
+         * DCB_STATE_NOPOLLING.
+         */		 
+        dcbfd = dcb->fd;
+        spinlock_release(&dcb->dcb_initlock);
+        if (dcbfd > 0) 
+		{
+            rc = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, dcbfd, &ev);
+            /**
+             * The poll_resolve_error function will always
+             * return 0 or crash.  So if it returns non-zero result, 
+             * things have gone wrong and we crash.
+             */
+            if (rc) rc = poll_resolve_error(dcb, errno, false);
+            if (rc) raise(SIGABRT);
         }
-        /*<
-         * This call was redundant, but the end result is correct.
-         */
-        else if (old_state == new_state)
-        {
-                rc = 0;
-                goto return_rc;
-        }
-        
-        /*< Set bit for each maxscale thread */
-        bitmask_copy(&dcb->memdata.bitmask, poll_bitmask()); 
-        rc = 0;
-return_rc:
         return rc;
+}
+
+/**
+ * Check error returns from epoll_ctl. Most result in a crash since they
+ * are "impossible". Adding when already present is assumed non-fatal.
+ * Likewise, removing when not present is assumed non-fatal.
+ * It is assumed that callers to poll routines can handle the failure
+ * that results from hitting system limit, although an error is written
+ * here to record the problem.
+ *
+ * @param errornum	The errno set by epoll_ctl
+ * @param adding        True for adding to poll list, false for removing
+ * @return              -1 on error or 0 for possibly revised return code
+ */
+static int
+poll_resolve_error(DCB *dcb, int errornum, bool adding)
+{
+    if (adding)
+    {
+        if (EEXIST == errornum)
+        {
+            LOGIF(LE, (skygw_log_write_flush(
+                LOGFILE_ERROR,
+                "%lu [poll_resolve_error] Error : epoll_ctl could not add, "
+                "already exists for DCB %p.",
+                pthread_self(),
+                dcb)));
+            // Assume another thread added and no serious harm done
+            return 0;
+        }
+        if (ENOSPC == errornum)
+        {
+            LOGIF(LE, (skygw_log_write_flush(
+                LOGFILE_ERROR,
+                "%lu [poll_resolve_error] The limit imposed by "
+                "/proc/sys/fs/epoll/max_user_watches was "
+                "encountered while trying to register (EPOLL_CTL_ADD) a new "
+                "file descriptor on an epoll instance for dcb %p.",
+                pthread_self(),
+                dcb)));
+            /* Failure - assume handled by callers */
+            return -1;
+        }
+    }
+    else
+    {
+        /* Must be removing */
+        if (ENOENT == errornum)
+        {
+            LOGIF(LE, (skygw_log_write_flush(
+                LOGFILE_ERROR,
+                "%lu [poll_resolve_error] Error : epoll_ctl could not remove, "
+                "not found, for dcb %p.",
+                pthread_self(),
+                dcb)));
+            // Assume another thread removed and no serious harm done
+            return 0;
+        }
+    }
+    /* Common checks for add or remove - crash MaxScale */
+    if (EBADF == errornum) raise(SIGABRT);
+    if (EINVAL == errornum) raise(SIGABRT);
+    if (ENOMEM == errornum) raise(SIGABRT);
+    if (EPERM == errornum) raise(SIGABRT);
+    /* Undocumented error number */
+    raise(SIGABRT);
+    /* The following statement should never be reached, but avoids compiler warning */
+    return -1;
 }
 
 #define	BLOCKINGPOLL	0	/*< Set BLOCKING POLL to 1 if using a single thread and to make
@@ -440,7 +546,6 @@ poll_waitevents(void *arg)
 struct epoll_event events[MAX_EVENTS];
 int		   i, nfds, timeout_bias = 1;
 intptr_t	   thread_id = (intptr_t)arg;
-DCB                *zombies = NULL;
 int		   poll_spins = 0;
 
 	/** Add this thread to the bitmask of running polling threads */
@@ -611,7 +716,7 @@ int		   poll_spins = 0;
 
 		if (thread_data)
 			thread_data[thread_id].state = THREAD_ZPROCESSING;
-		zombies = dcb_process_zombies(thread_id);
+		dcb_process_zombies(thread_id);
 		if (thread_data)
 			thread_data[thread_id].state = THREAD_IDLE;
 
@@ -796,16 +901,6 @@ unsigned long	qtime;
 		eno = gw_getsockerrno(dcb->fd);
 
 		if (eno == 0)  {
-#if MUTEX_BLOCK
-			simple_mutex_lock(&dcb->dcb_write_lock, true);
-			ss_info_dassert(!dcb->dcb_write_active,
-					"Write already active");
-			dcb->dcb_write_active = TRUE;
-			atomic_add(&pollStats.n_write, 1);
-			dcb->func.write_ready(dcb);
-			dcb->dcb_write_active = FALSE;
-			simple_mutex_unlock(&dcb->dcb_write_lock);
-#else
 			atomic_add(&pollStats.n_write, 1);
 			/** Read session id to thread's local storage */
 			LOGIF_MAYBE(LT, (dcb_get_ses_log_info(
@@ -813,8 +908,8 @@ unsigned long	qtime;
 						&tls_log_info.li_sesid, 
 						&tls_log_info.li_enabled_logs)));
 			dcb->func.write_ready(dcb);
-#endif
 		} else {
+                        char errbuf[STRERROR_BUFLEN];
 			LOGIF(LD, (skygw_log_write(
 				LOGFILE_DEBUG,
 				"%lu [poll_waitevents] "
@@ -822,19 +917,13 @@ unsigned long	qtime;
 				"dcb %p, fd %i",
 				pthread_self(),
 				eno,
-				strerror(eno),
+				strerror_r(eno, errbuf, sizeof(errbuf)),
 				dcb,
 				dcb->fd)));
 		}
 	}
 	if (ev & EPOLLIN)
 	{
-#if MUTEX_BLOCK
-		simple_mutex_lock(&dcb->dcb_read_lock, true);
-		ss_info_dassert(!dcb->dcb_read_active, "Read already active");
-		dcb->dcb_read_active = TRUE;
-#endif
-		
 		if (dcb->state == DCB_STATE_LISTENING)
 		{
 			LOGIF(LD, (skygw_log_write(
@@ -868,11 +957,6 @@ unsigned long	qtime;
 				&tls_log_info.li_enabled_logs)));
 			dcb->func.read(dcb);
 		}
-#if MUTEX_BLOCK
-		dcb->dcb_read_active = FALSE;
-		simple_mutex_unlock(
-			&dcb->dcb_read_lock);
-#endif
 	}
 	if (ev & EPOLLERR)
 	{
@@ -880,6 +964,7 @@ unsigned long	qtime;
 #if defined(FAKE_CODE)
 		if (eno == 0) {
 			eno = dcb_fake_write_errno[dcb->fd];
+                        char errbuf[STRERROR_BUFLEN];
 			LOGIF(LD, (skygw_log_write(
 				LOGFILE_DEBUG,
 				"%lu [poll_waitevents] "
@@ -887,18 +972,19 @@ unsigned long	qtime;
 				"%s",
 				pthread_self(),
 				eno,
-				strerror(eno))));
+				strerror_r(eno, errbuf, sizeof(errbuf)))));
 		}
 		dcb_fake_write_errno[dcb->fd] = 0;
 #endif /* FAKE_CODE */
 		if (eno != 0) {
+                        char errbuf[STRERROR_BUFLEN];
 			LOGIF(LD, (skygw_log_write(
 				LOGFILE_DEBUG,
 				"%lu [poll_waitevents] "
 				"EPOLLERR due %d, %s.",
 				pthread_self(),
 				eno,
-				strerror(eno))));
+				strerror_r(eno, errbuf, sizeof(errbuf)))));
 		}
 		atomic_add(&pollStats.n_error, 1);
 		/** Read session id to thread's local storage */
@@ -913,7 +999,7 @@ unsigned long	qtime;
 	{
 		int eno = 0;
 		eno = gw_getsockerrno(dcb->fd);
-		
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LD, (skygw_log_write(
 			LOGFILE_DEBUG,
 			"%lu [poll_waitevents] "
@@ -923,7 +1009,7 @@ unsigned long	qtime;
 			dcb,
 			dcb->fd,
 			eno,
-			strerror(eno))));
+			strerror_r(eno, errbuf, sizeof(errbuf)))));
 		atomic_add(&pollStats.n_hup, 1);
 		spinlock_acquire(&dcb->dcb_initlock);
 		if ((dcb->flags & DCBF_HUNG) == 0)
@@ -946,7 +1032,7 @@ unsigned long	qtime;
 	{
 		int eno = 0;
 		eno = gw_getsockerrno(dcb->fd);
-		
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LD, (skygw_log_write(
 			LOGFILE_DEBUG,
 			"%lu [poll_waitevents] "
@@ -956,7 +1042,7 @@ unsigned long	qtime;
 			dcb,
 			dcb->fd,
 			eno,
-			strerror(eno))));
+			strerror_r(eno, errbuf, sizeof(errbuf)))));
 		atomic_add(&pollStats.n_hup, 1);
 		spinlock_acquire(&dcb->dcb_initlock);
 		if ((dcb->flags & DCBF_HUNG) == 0)
@@ -1587,24 +1673,28 @@ RESULT_ROW	*row;
 		resultset_row_set(row, 0, "< 100ms");
 	else if (*rowno == N_QUEUE_TIMES - 1)
 	{
-		sprintf(buf, "> %2d00ms", N_QUEUE_TIMES);
+		snprintf(buf,39, "> %2d00ms", N_QUEUE_TIMES);
+		buf[39] = '\0';
 		resultset_row_set(row, 0, buf);
 	}
 	else
 	{
-		sprintf(buf, "%2d00 - %2d00ms", *rowno, (*rowno) + 1);
+		snprintf(buf,39, "%2d00 - %2d00ms", *rowno, (*rowno) + 1);
+		buf[39] = '\0';
 		resultset_row_set(row, 0, buf);
 	}
-	sprintf(buf, "%d", queueStats.qtimes[*rowno]);
+	snprintf(buf,39, "%d", queueStats.qtimes[*rowno]);
+	buf[39] = '\0';
 	resultset_row_set(row, 1, buf);
-	sprintf(buf, "%d", queueStats.exectimes[*rowno]);
+	snprintf(buf,39, "%d", queueStats.exectimes[*rowno]);
+	buf[39] = '\0';
 	resultset_row_set(row, 2, buf);
 	(*rowno)++;
 	return row;
 }
 
 /**
- * Return a resultset that has the current set of services in it
+ * Return a result set that has the current set of services in it
  *
  * @return A Result set
  */

@@ -43,6 +43,8 @@
  * 30/08/14	Massimiliano Pinto	Addition of SERVER_STALE_STATUS
  * 27/10/14	Massimiliano Pinto	Addition of SERVER_MASTER_STICKINESS
  * 19/02/15	Mark Riddoch		Addition of serverGetList
+ * 01/06/15	Massimiliano Pinto	Addition of server_update_address/port
+ * 19/06/15	Martin Brampton		Extra fields for persistent connections, CHK_SERVER
  *
  * @endverbatim
  */
@@ -66,6 +68,7 @@ typedef struct {
 	int		n_connections;	/**< Number of connections */
 	int		n_current;	/**< Current connections */
 	int             n_current_ops;  /**< Current active operations */
+	int             n_persistent;  /**< Current persistent pool */
 } SERVER_STATS;
 
 /**
@@ -75,6 +78,9 @@ typedef struct {
  * between the gateway and the server.
  */
 typedef struct server {
+#if defined(SS_DEBUG)
+        skygw_chk_t     server_chk_top;
+#endif
 	char		*unique_name;	/**< Unique name for the server */
 	char		*name;		/**< Server name/IP address*/
 	unsigned short	port;		/**< Port to listen on */
@@ -94,6 +100,14 @@ typedef struct server {
 	int		depth;		/**< Replication level in the tree */
 	long		*slaves;	/**< Slaves of this node */
 	bool            master_err_is_logged; /*< If node failed, this indicates whether it is logged */
+        DCB             *persistent;    /**< List of unused persistent connections to the server */
+        SPINLOCK        persistlock;   /**< Lock for adjusting the persistent connections list */
+        long            persistpoolmax; /**< Maximum size of persistent connections pool */
+        long            persistmaxtime; /**< Maximum number of seconds connection can live */
+        int             persistmax;     /**< Maximum pool size actually achieved since startup */
+#if defined(SS_DEBUG)
+        skygw_chk_t     server_chk_tail;
+#endif
 } SERVER;
 
 /**
@@ -118,7 +132,7 @@ typedef struct server {
  */
 #define	SERVER_IS_RUNNING(server)	(((server)->status & (SERVER_RUNNING|SERVER_MAINT)) == SERVER_RUNNING)
 /**
- * Is the server marked as down - the macro returns true if the server is beleived
+ * Is the server marked as down - the macro returns true if the server is believed
  * to be inoperable.
  */
 #define	SERVER_IS_DOWN(server)		(((server)->status & SERVER_RUNNING) == 0)
@@ -180,6 +194,7 @@ extern void	printAllServers();
 extern void	dprintAllServers(DCB *);
 extern void	dprintAllServersJson(DCB *);
 extern void	dprintServer(DCB *, SERVER *);
+extern void     dprintPersistentDCBs(DCB *, SERVER *);
 extern void	dListServers(DCB *);
 extern char	*server_status(SERVER *);
 extern void	server_set_status(SERVER *, int);
@@ -189,5 +204,8 @@ extern void	serverAddParameter(SERVER *, char *, char *);
 extern char	*serverGetParameter(SERVER *, char *);
 extern void	server_update(SERVER *, char *, char *, char *);
 extern void     server_set_unique_name(SERVER *, char *);
+extern DCB      *server_get_persistent(SERVER *, char *, const char *);
+extern void	server_update_address(SERVER *, char *);
+extern void	server_update_port(SERVER *,  unsigned short);
 extern RESULTSET	*serverGetList();
 #endif

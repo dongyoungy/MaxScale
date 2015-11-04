@@ -55,6 +55,13 @@
 #include <histedit.h>
 #endif
 
+/*
+ * We need a common.h file that is included by every component.
+ */
+#if !defined(STRERROR_BUFLEN)
+#define STRERROR_BUFLEN 512
+#endif
+
 static int connectMaxScale(char *hostname, char *port);
 static int setipaddress(struct in_addr *a, char *p);
 static int authMaxScale(int so, char *user, char *password);
@@ -63,7 +70,7 @@ static void DoSource(int so, char *cmd);
 static void DoUsage();
 static int isquit(char *buf);
 static void PrintVersion(const char *progname);
-static void read_inifile(char **hostname, char **port, char **user, char **passwd);
+static void read_inifile(char **hostname, char **port, char **user, char **passwd,int*);
 
 #ifdef HISTORY
 static char *
@@ -82,6 +89,7 @@ static struct option long_options[] = {
   {"port",     required_argument, 0, 'P'},
   {"version",  no_argument,       0, 'v'},
   {"help",     no_argument,       0, '?'},
+  {"emacs",     no_argument,       0, 'e'},
   {0, 0, 0, 0}
 };
 
@@ -94,6 +102,9 @@ static struct option long_options[] = {
 int
 main(int argc, char **argv)
 {
+const char* vi = "vi";
+const char* emacs = "emacs";
+
 int		i, num, rv;
 #ifdef HISTORY
 char		*buf;
@@ -101,7 +112,6 @@ EditLine	*el = NULL;
 Tokenizer	*tok;
 History		*hist;
 HistEvent	ev;
-const LineInfo	*li;
 #else
 char		buf[1024];
 #endif
@@ -109,13 +119,14 @@ char		*hostname = "localhost";
 char		*port = "6603";
 char		*user = "admin";
 char		*passwd = NULL;
+int use_emacs = 0;
 int		so;
 int             option_index = 0;
 char            c;
 
-	read_inifile(&hostname, &port, &user, &passwd);
+	read_inifile(&hostname, &port, &user, &passwd,&use_emacs);
 
-        while ((c = getopt_long(argc, argv, "h:p:P:u:v?", 
+        while ((c = getopt_long(argc, argv, "h:p:P:u:v?e", 
 				long_options, &option_index))
 	       >= 0)
         {
@@ -135,6 +146,9 @@ char            c;
 	  case 'v':
 	    PrintVersion(*argv);
 	    exit(EXIT_SUCCESS);
+      case 'e':
+          use_emacs = 1;
+          break;          
 	  case '?':
 	    DoUsage(*argv);
 	    exit(optopt ? EXIT_FAILURE : EXIT_SUCCESS);
@@ -191,7 +205,7 @@ char            c;
 	  for (i = optind +1; i < argc; i++)
 	  {
 	    strcat(cmd, " ");
-	    /* Arguments after the seconf are quoted to allow for names
+	    /* Arguments after the second are quoted to allow for names
 	     * that contain white space
 	     */
 	    if (i - optind > 1)
@@ -224,7 +238,10 @@ char            c;
 					/* Initialize editline		*/
 	el = el_init(*argv, stdin, stdout, stderr);
 
-	el_set(el, EL_EDITOR, "vi");	/* Default editor is vi		*/
+    if(use_emacs)
+        el_set(el, EL_EDITOR, emacs);	/** Editor is emacs */
+    else
+        el_set(el, EL_EDITOR, vi);	/* Default editor is vi		*/
 	el_set(el, EL_SIGNAL, 1);	/* Handle signals gracefully	*/
 	el_set(el, EL_PROMPT, prompt);/* Set the prompt function */
 
@@ -255,7 +272,7 @@ char            c;
 			buf[i] = 0;
 
 #ifdef HISTORY
-		li = el_line(el);
+		el_line(el);
 		history(hist, &ev, H_ENTER, buf);
 #endif
 
@@ -319,8 +336,9 @@ int			keepalive = 1;
 
 	if ((so = socket(AF_INET, SOCK_STREAM, 0)) < 0)
 	{
+                char errbuf[STRERROR_BUFLEN];
 		fprintf(stderr, "Unable to create socket: %s\n",
-				strerror(errno));
+                        strerror_r(errno, errbuf, sizeof(errbuf)));
 		return -1;
 	}
 	memset(&addr, 0, sizeof addr);
@@ -329,8 +347,9 @@ int			keepalive = 1;
 	addr.sin_port = htons(atoi(port));
 	if (connect(so, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 	{
+                char errbuf[STRERROR_BUFLEN];
 		fprintf(stderr, "Unable to connect to MaxScale at %s, %s: %s\n",
-				hostname, port, strerror(errno));
+                        hostname, port, strerror_r(errno, errbuf, sizeof(errbuf)));
 		close(so);
 		return -1;
 	}
@@ -422,10 +441,10 @@ char	buf[20];
 }
 
 /**
- * Send a comamnd using the MaxScaled protocol, display the return data
+ * Send a command using the MaxScaled protocol, display the return data
  * on standard output.
  *
- * Input terminates with a lien containing just the text OK
+ * Input terminates with a line containing just the text OK
  *
  * @param so	The socket connect to MaxScale
  * @param cmd	The command to send
@@ -592,7 +611,7 @@ char	*ptr = str + strlen(str);
  * @param passwd	Pointer to the password to be updated
  */
 static void
-read_inifile(char **hostname, char **port, char **user, char **passwd)
+read_inifile(char **hostname, char **port, char **user, char **passwd, int* editor)
 {
 char	pathname[400];
 char	*home, *brkt;
@@ -624,6 +643,17 @@ char	line[400];
 				*user = strdup(value);
 			else if (strcmp(name, "passwd") == 0)
 				*passwd = strdup(value);
+			else if (strcmp(name, "editor") == 0)
+            {
+                
+                if(strcmp(value,"vi") == 0)
+                    *editor = 0;
+                else if(strcmp(value,"emacs") == 0)
+                    *editor = 1;
+                else
+				fprintf(stderr, "WARNING: Unrecognised "
+					"parameter '%s=%s' in .maxadmin file\n", name, value);
+            }
 			else
 			{
 				fprintf(stderr, "WARNING: Unrecognised "

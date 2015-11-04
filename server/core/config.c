@@ -41,7 +41,9 @@
  * 30/10/14	Massimiliano Pinto	Added disable_master_failback parameter
  * 07/11/14	Massimiliano Pinto	Addition of monitor timeouts for connect/read/write
  * 20/02/15	Markus Mäkelä		Added connection_timeout parameter for services
- * 05/03/15	Massimiliano	Pinto	Added notification_feedback support
+ * 05/03/15	Massimiliano Pinto	Added notification_feedback support
+ * 20/04/15	Guillaume Lefranc	Added available_when_donor parameter
+ * 22/04/15 Martin Brampton     Added disable_master_role_setting parameter
  *
  * @endverbatim
  */
@@ -71,7 +73,14 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <pcre.h>
+#include <dbusers.h>
+#include <gw.h>
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
+/** According to the PCRE manual, this should be a multiple of 3 */
+#define MAXSCALE_PCRE_BUFSZ 24
 
 /** Defined in log_manager.cc */
 extern int            lm_enabled_logfiles_bitmask;
@@ -83,17 +92,20 @@ static	int	process_config_context(CONFIG_CONTEXT	*);
 static	int	process_config_update(CONFIG_CONTEXT *);
 static	void	free_config_context(CONFIG_CONTEXT	*);
 static	char 	*config_get_value(CONFIG_PARAMETER *, const char *);
+static	const char 	*config_get_value_string(CONFIG_PARAMETER *, const char *);
 static	int	handle_global_item(const char *, const char *);
 static	int	handle_feedback_item(const char *, const char *);
 static	void	global_defaults();
 static	void	feedback_defaults();
 static	void	check_config_objects(CONFIG_CONTEXT *context);
+static int maxscale_getline(char** dest, int* size, FILE* file);
 int	config_truth_value(char *str);
-static	int	internalService(char *router);
+bool	isInternalService(char *router);
 int	config_get_ifaddr(unsigned char *output);
 int	config_get_release_string(char* release);
 FEEDBACK_CONF * config_get_feedback_data();
 void config_add_param(CONFIG_CONTEXT*,char*,char*);
+bool config_has_duplicate_sections(const char* config);
 static	char		*config_file = NULL;
 static	GATEWAY_CONF	gateway;
 static	FEEDBACK_CONF	feedback;
@@ -122,6 +134,57 @@ char	*ptr;
 	return str;
 }
 
+/**
+ * Remove extra commas and whitespace from a string. This string is interpreted
+ * as a list of string values separated by commas.
+ * @param strptr String to clean
+ * @return pointer to a new string or NULL if an error occurred
+ */
+char* config_clean_string_list(char* str)
+{
+    char *tmp;
+
+    if((tmp = malloc(sizeof(char)*(strlen(str) + 1))) != NULL)
+    {
+        char *ptr;
+        int match[MAXSCALE_PCRE_BUFSZ];
+        pcre* re;
+        const char *re_err;
+        int err_offset,rval;
+
+
+        tmp[0] = '\0';
+
+        if((re = pcre_compile("\\s*+([^,]*[^,\\s])",0,&re_err,&err_offset,NULL)) == NULL)
+        {
+            skygw_log_write(LE,"[%s] Error: Regular expression compilation failed at %d: %s",
+                            __FUNCTION__,err_offset,re_err);
+            free(tmp);
+            return NULL;
+        }
+
+        ptr = str;
+
+        while((rval =  pcre_exec(re,NULL,ptr,strlen(ptr),0,0,(int*)&match,MAXSCALE_PCRE_BUFSZ)) > 1)
+        {
+            const char* substr;
+
+            pcre_get_substring(ptr,(int*)&match,rval,1,&substr);
+            if(strlen(tmp) > 0)
+                strcat(tmp,",");
+            strcat(tmp,substr);
+            pcre_free_substring(substr);
+            ptr = &ptr[match[1]];
+        }
+        pcre_free(re);
+    }
+    else
+    {
+        skygw_log_write(LE,"[%s] Error: Memory allocation failed.",__FUNCTION__);
+    }
+
+    return tmp;
+}
 /**
  * Config item handler for the ini file reader
  *
@@ -171,12 +234,24 @@ CONFIG_PARAMETER	*param, *p1;
 	{
 		if (!strcmp(p1->name, name))
 		{
-			LOGIF(LE, (skygw_log_write_flush(
-                                LOGFILE_ERROR,
-                                "Error : Configuration object '%s' has multiple "
-				"parameters names '%s'.",
-                                ptr->object, name)));
-			return 0;
+                    char *tmp;
+                    int paramlen = strlen(p1->value) + strlen(value) + 2;
+
+                    if((tmp = realloc(p1->value,sizeof(char) * (paramlen))) == NULL)
+                    {
+                        skygw_log_write(LE,"[%s] Error: Memory allocation failed.",__FUNCTION__);
+                        return 0;
+                    }
+                    strcat(tmp,",");
+                    strcat(tmp,value);
+                    if((p1->value = config_clean_string_list(tmp)) == NULL)
+                    {
+                        p1->value = tmp;
+                        skygw_log_write(LE,"[%s] Error: Cleaning configuration parameter failed.",__FUNCTION__);
+                        return 0;
+                    }
+                    free(tmp);
+                    return 1;
 		}
 		p1 = p1->next;
 	}
@@ -202,18 +277,43 @@ int
 config_load(char *file)
 {
 CONFIG_CONTEXT	config;
-int		rval;
+int		rval, ini_rval;
 
+    if (config_has_duplicate_sections(file))
+    {
+        return 0;
+    }
 	MYSQL *conn;
 	conn = mysql_init(NULL);
 	if (conn) {
 		if (mysql_real_connect(conn, NULL, NULL, NULL, NULL, 0, NULL, 0)) {
-			char *ptr;
-			version_string = (char *)mysql_get_server_info(conn);
+			char *ptr,*tmp;
+			
+			tmp = (char *)mysql_get_server_info(conn);
+			unsigned int server_version = mysql_get_server_version(conn);
+			
+			if(version_string)
+			    free(version_string);
+
+			if((version_string = malloc(strlen(tmp) + strlen("5.5.5-") + 1)) == NULL)
+			    return 0;
+
+			if (server_version >= 100000)
+			{
+			    strcpy(version_string,"5.5.5-");
+			    strcat(version_string,tmp);
+			}
+			else
+			{
+			    strcpy(version_string,tmp);
+			}
+
 			ptr = strstr(version_string, "-embedded");
 			if (ptr) {
 				*ptr = '\0';
 			}
+			
+
 		}
 		mysql_close(conn);
 	}
@@ -224,8 +324,23 @@ int		rval;
 	config.object = "";
 	config.next = NULL;
 
-	if (ini_parse(file, handler, &config) < 0)
+	if (( ini_rval = ini_parse(file, handler, &config)) != 0)
+        {
+             char errorbuffer[1024 + 1];
+
+            if (ini_rval > 0)
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to parse configuration file. Error on line %d.", ini_rval);
+            else if(ini_rval == -1)
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to parse configuration file. Failed to open file.");
+            else
+                snprintf(errorbuffer, sizeof(errorbuffer),
+                         "Error: Failed to parse configuration file. Memory allocation failed.");
+
+            skygw_log_write(LE, errorbuffer);
 		return 0;
+        }
 
 	config_file = file;
 
@@ -249,6 +364,11 @@ int		rval;
 
 	if (!config_file)
 		return 0;
+
+    if (config_has_duplicate_sections(config_file))
+    {
+        return 0;
+    }
 
 	if (gateway.version_string)
 		free(gateway.version_string);
@@ -277,10 +397,18 @@ int		rval;
 static	int
 process_config_context(CONFIG_CONTEXT *context)
 {
-CONFIG_CONTEXT		*obj;
-int			error_count = 0;
+    CONFIG_CONTEXT  *obj;
+    int             error_count = 0;
+    HASHTABLE*      monitorhash;
 
-	/**
+    if((monitorhash = hashtable_alloc(5,simple_str_hash,strcmp)) == NULL)
+    {
+        skygw_log_write(LOGFILE_ERROR,"Error: Failed to allocate ,monitor configuration check hashtable.");
+        return 0;
+    }
+    hashtable_memory_fns(monitorhash,(HASHMEMORYFN)strdup,NULL,(HASHMEMORYFN)free,NULL);
+
+    /**
 	 * Process the data and create the services and servers defined
 	 * in the data.
 	 */
@@ -309,9 +437,13 @@ int			error_count = 0;
 				char *enable_root_user;
 				char *connection_timeout;
 				char *auth_all_servers;
+				char *optimize_wildcard;
 				char *strip_db_esc;
 				char *weightby;
 				char *version_string;
+				char *subservices;
+				char *ssl,*ssl_cert,*ssl_key,*ssl_ca_cert,*ssl_version;
+				char* ssl_cert_verify_depth;
 				bool  is_rwsplit = false;
 				bool  is_schemarouter = false;
 				char *allow_localhost_match_wildcard_host;
@@ -319,6 +451,13 @@ int			error_count = 0;
 				obj->element = service_alloc(obj->object, router);
 				user = config_get_value(obj->parameters, "user");
 				auth = config_get_value(obj->parameters, "passwd");
+				subservices = config_get_value(obj->parameters, "subservices");
+				ssl = config_get_value(obj->parameters, "ssl");
+				ssl_cert = config_get_value(obj->parameters, "ssl_cert");
+				ssl_key = config_get_value(obj->parameters, "ssl_key");
+				ssl_ca_cert = config_get_value(obj->parameters, "ssl_ca_cert");
+				ssl_version = config_get_value(obj->parameters, "ssl_version");
+				ssl_cert_verify_depth = config_get_value(obj->parameters, "ssl_cert_verify_depth");
 				enable_root_user = config_get_value(
 							obj->parameters, 
 							"enable_root_user");
@@ -328,9 +467,14 @@ int			error_count = 0;
 						obj->parameters,
 						"connection_timeout");
 
-				auth_all_servers = 
+				optimize_wildcard =
 					config_get_value(
 						obj->parameters, 
+						"optimize_wildcard");
+
+				auth_all_servers =
+					config_get_value(
+						obj->parameters,
 						"auth_all_servers");
 
 				strip_db_esc = 
@@ -346,6 +490,25 @@ int			error_count = 0;
 			
 				version_string = config_get_value(obj->parameters, 
 								  "version_string");
+
+				if(subservices)
+				{
+				    service_set_param_value(obj->element,
+						     obj->parameters,
+						     subservices,
+						     1,STRING_TYPE);
+				}
+
+                CONFIG_PARAMETER* param;
+                if((param = config_get_param(obj->parameters, "ignore_databases")))
+                {
+                    service_set_param_value(obj->element, param, param->value, 0, STRING_TYPE);
+                }
+
+                if((param = config_get_param(obj->parameters, "ignore_databases_regex")))
+                {
+                    service_set_param_value(obj->element, param, param->value, 0, STRING_TYPE);
+                }
 				/** flag for rwsplit-specific parameters */
 				if (strncmp(router, "readwritesplit", strlen("readwritesplit")+1) == 0)
 				{
@@ -369,7 +532,21 @@ int			error_count = 0;
                                 }
 
                                 if (version_string) {
+
+				    /** Add the 5.5.5- string to the start of the version string if
+				     * the version string starts with "10.".
+				     * This mimics MariaDB 10.0 replication which adds 5.5.5- for backwards compatibility. */
+				    if(strncmp(version_string,"10.",3) == 0)
+				    {
+					((SERVICE *)(obj->element))->version_string = malloc((strlen(version_string) +
+						strlen("5.5.5-") + 1) * sizeof(char));
+					strcpy(((SERVICE *)(obj->element))->version_string,"5.5.5-");
+					strcat(((SERVICE *)(obj->element))->version_string,version_string);
+				    }
+				    else
+				    {
 					((SERVICE *)(obj->element))->version_string = strdup(version_string);
+				    }
 				} else {
 					if (gateway.version_string)
 						((SERVICE *)(obj->element))->version_string = strdup(gateway.version_string);
@@ -381,8 +558,87 @@ int			error_count = 0;
                                 max_slave_rlag_str = 
                                         config_get_value(obj->parameters, 
                                                          "max_slave_replication_lag");
-                                        
-				if (enable_root_user)
+
+				if(ssl)
+				{
+				    if(ssl_cert == NULL)
+				    {
+					error_count++;
+					skygw_log_write(LE,"Error: Server certificate missing for service '%s'."
+						"Please provide the path to the server certificate by adding the ssl_cert=<path> parameter",
+						 obj->object);
+				    }
+				    if(ssl_ca_cert == NULL)
+				    {
+					error_count++;
+					skygw_log_write(LE,"Error: CA Certificate missing for service '%s'."						
+						"Please provide the path to the certificate authority certificate by adding the ssl_ca_cert=<path> parameter",
+						 obj->object);
+				    }
+				    if(ssl_key == NULL)
+				    {
+					error_count++;
+					skygw_log_write(LE,"Error: Server private key missing for service '%s'. "
+						"Please provide the path to the server certificate key by adding the ssl_key=<path> parameter"
+						,obj->object);
+				    }
+
+				    if(access(ssl_ca_cert,F_OK) != 0)
+				    {
+					skygw_log_write(LE,"Error: Certificate authority file for service '%s' not found: %s",
+						 obj->object,
+						 ssl_ca_cert);
+					error_count++;
+				    }
+				    if(access(ssl_cert,F_OK) != 0)
+				    {
+					skygw_log_write(LE,"Error: Server certificate file for service '%s' not found: %s",
+						 obj->object,
+						 ssl_cert);
+					error_count++;
+				    }
+				    if(access(ssl_key,F_OK) != 0)
+				    {
+					skygw_log_write(LE,"Error: Server private key file for service '%s' not found: %s",
+						 obj->object,
+						 ssl_key);
+					error_count++;
+				    }
+
+				    if(error_count == 0)
+				    {
+					if(serviceSetSSL(obj->element,ssl) != 0)
+					{
+					    skygw_log_write(LE,"Error: Unknown parameter for service '%s': %s",obj->object,ssl);
+					    error_count++;
+					}
+					else
+					{
+					    serviceSetCertificates(obj->element,ssl_cert,ssl_key,ssl_ca_cert);
+					    if(ssl_version)
+					    {
+						if(serviceSetSSLVersion(obj->element,ssl_version) != 0)
+						{
+						    skygw_log_write(LE,"Error: Unknown parameter value for 'ssl_version' for service '%s': %s",obj->object,ssl_version);
+						    error_count++;
+						}
+					    }
+					    if(ssl_cert_verify_depth)
+					    {
+						if(serviceSetSSLVerifyDepth(obj->element,atoi(ssl_cert_verify_depth)) != 0)
+						{
+						    skygw_log_write(LE,"Error: Invalid parameter value for 'ssl_cert_verify_depth' for service '%s': %s",obj->object,ssl_cert_verify_depth);
+						    error_count++;
+						}
+					    }
+					}
+				    }
+
+				}
+
+                serviceSetRetryOnFailure(obj->element, config_get_value(obj->parameters, "retry_on_failure"));
+
+                if (enable_root_user)
 					serviceEnableRootUser(
                                                 obj->element, 
                                                 config_truth_value(enable_root_user));
@@ -395,6 +651,10 @@ int			error_count = 0;
 				if(auth_all_servers)
 					serviceAuthAllServers(obj->element, 
 						config_truth_value(auth_all_servers));
+
+				if(optimize_wildcard)
+					serviceOptimizeWildcard(obj->element,
+						config_truth_value(optimize_wildcard));
 
 				if(strip_db_esc)
 					serviceStripDbEsc(obj->element, 
@@ -612,6 +872,9 @@ int			error_count = 0;
 			}
 			if (obj->element)
 			{
+                                SERVER *server = obj->element;
+                                server->persistpoolmax = strtol(config_get_value_string(obj->parameters, "persistpoolmax"), NULL, 0);
+                                server->persistmaxtime = strtol(config_get_value_string(obj->parameters, "persistmaxtime"), NULL, 0);
 				CONFIG_PARAMETER *params = obj->parameters;
 				while (params)
 				{
@@ -625,6 +888,10 @@ int			error_count = 0;
 								"monitorpw")
 						&& strcmp(params->name,
 								"type")
+						&& strcmp(params->name,
+								"persistpoolmax")
+						&& strcmp(params->name,
+								"persistmaxtime")
 						)
 					{
 						serverAddParameter(obj->element,
@@ -739,7 +1006,7 @@ int			error_count = 0;
 					s = strtok_r(NULL, ",", &lasts);
 				}
 			}
-			else if (servers == NULL && internalService(router) == 0)
+			else if (servers == NULL && !isInternalService(router))
 			{
 				LOGIF(LE, (skygw_log_write_flush(
                                         LOGFILE_ERROR,
@@ -781,62 +1048,69 @@ int			error_count = 0;
 			/* if id is not set, do it now */
 			if (gateway.id == 0) {
 				setipaddress(&serv_addr.sin_addr, (address == NULL) ? "0.0.0.0" : address);
-				gateway.id = (unsigned long) (serv_addr.sin_addr.s_addr + port != NULL ? atoi(port) : 0 + getpid());
-			}
-                
-			if (service && socket && protocol) {        
-				CONFIG_CONTEXT *ptr = context;
-				while (ptr && strcmp(ptr->object, service) != 0)
-					ptr = ptr->next;
-				if (ptr && ptr->element)
-				{
-					serviceAddProtocol(ptr->element,
-                                                           protocol,
-							   socket,
-                                                           0);
-				} else {
-					LOGIF(LE, (skygw_log_write_flush(
-						LOGFILE_ERROR,
-                                        	"Error : Listener '%s', "
-                                        	"service '%s' not found. "
-						"Listener will not execute for socket %s.",
-	                                        obj->object, service, socket)));
-					error_count++;
-				}
+				gateway.id = (unsigned long) (serv_addr.sin_addr.s_addr + (port != NULL ? atoi(port) : 0 + getpid()));
 			}
 
-			if (service && port && protocol) {
+			if(service && protocol && (socket || port))
+			{
+			    if (socket)
+			    {
 				CONFIG_CONTEXT *ptr = context;
 				while (ptr && strcmp(ptr->object, service) != 0)
-					ptr = ptr->next;
+				    ptr = ptr->next;
 				if (ptr && ptr->element)
 				{
-					serviceAddProtocol(ptr->element,
-                                                           protocol,
-							   address,
-                                                           atoi(port));
+				    serviceAddProtocol(ptr->element,
+						     protocol,
+						     socket,
+						     0);
+				} 
+				else
+				{
+				    LOGIF(LE, (skygw_log_write_flush(
+					    LOGFILE_ERROR,
+					    "Error : Listener '%s', "
+					    "service '%s' not found. "
+					    "Listener will not execute for socket %s.",
+					    obj->object, service, socket)));
+				    error_count++;
+				}
+			    }
+
+			    if (port)
+			    {
+				CONFIG_CONTEXT *ptr = context;
+				while (ptr && strcmp(ptr->object, service) != 0)
+				    ptr = ptr->next;
+				if (ptr && ptr->element)
+				{
+				    serviceAddProtocol(ptr->element,
+						     protocol,
+						     address,
+						     atoi(port));
 				}
 				else
 				{
-					LOGIF(LE, (skygw_log_write_flush(
-						LOGFILE_ERROR,
-                                        	"Error : Listener '%s', "
-                                        	"service '%s' not found. "
-						"Listener will not execute.",
-	                                        obj->object, service)));
-					error_count++;
+				    LOGIF(LE, (skygw_log_write_flush(
+					    LOGFILE_ERROR,
+					    "Error : Listener '%s', "
+					    "service '%s' not found. "
+					    "Listener will not execute.",
+					    obj->object, service)));
+				    error_count++;
 				}
+			    }
 			}
 			else
 			{
-				LOGIF(LE, (skygw_log_write_flush(
-                                        LOGFILE_ERROR,
-                                        "Error : Listener '%s' is misisng a "
-                                        "required "
-                                        "parameter. A Listener must have a "
-                                        "service, port and protocol defined.",
-                                        obj->object)));
-				error_count++;
+			    LOGIF(LE, (skygw_log_write_flush(
+				    LOGFILE_ERROR,
+				    "Error : Listener '%s' is missing a "
+				    "required "
+				    "parameter. A Listener must have a "
+				    "service, port and protocol defined.",
+				    obj->object)));
+			    error_count++;
 			}
 		}
 		else if (!strcmp(type, "monitor"))
@@ -885,6 +1159,10 @@ int			error_count = 0;
 					/* set monitor interval */
 					if (interval > 0)
 						monitorSetInterval(obj->element, interval);
+					else
+					    skygw_log_write(LOGFILE_ERROR,"Warning: Monitor '%s' "
+						    "missing monitor_interval parameter, "
+						    "default value of 10000 miliseconds.",obj->object);
 
 					/* set timeouts */
 					if (connect_timeout > 0)
@@ -906,6 +1184,13 @@ int			error_count = 0;
                                                             obj->element && obj1->element)
                                                         {
 								found = 1;
+								if(hashtable_add(monitorhash,obj1->object,"") == 0)
+								{
+								    skygw_log_write(LOGFILE_ERROR,
+									     "Warning: Multiple monitors are monitoring server [%s]. "
+									    "This will cause undefined behavior.",
+									     obj1->object);
+								}
 								monitorAddServer(
                                                                         obj->element,
                                                                         obj1->element);
@@ -930,6 +1215,7 @@ int			error_count = 0;
 					monitorAddUser(obj->element,
                                                        user,
                                                        passwd);
+					check_monitor_permissions(obj->element);
 				}
 				else if (obj->element && user)
 				{
@@ -966,7 +1252,8 @@ int			error_count = 0;
 		obj = obj->next;
 	} /*< while */
 	/** TODO: consistency check function */
-        
+
+	hashtable_free(monitorhash);
         /**
          * error_count += consistency_checks();
          */
@@ -1001,6 +1288,25 @@ config_get_value(CONFIG_PARAMETER *params, const char *name)
 		params = params->next;
 	}
 	return NULL;
+}
+
+/**
+ * Get the value of a config parameter as a string
+ *
+ * @param params	The linked list of config parameters
+ * @param name		The parameter to return
+ * @return the parameter value or null string if not found
+ */
+static const char *
+config_get_value_string(CONFIG_PARAMETER *params, const char *name)
+{
+	while (params)
+	{
+		if (!strcmp(params->name, name))
+			return (const char *)params->value;
+		params = params->next;
+	}
+	return "";
 }
 
 
@@ -1249,7 +1555,16 @@ handle_global_item(const char *name, const char *value)
 int i;
 	if (strcmp(name, "threads") == 0)
 	{
-		gateway.n_threads = atoi(value);
+		int thrcount = atoi(value);
+		if (thrcount > 0)
+		{
+			gateway.n_threads = thrcount;
+		}
+		else
+		{
+			skygw_log_write(LE, "Warning: Invalid value for 'threads': %s.", value);
+			return 0;
+		}
 	}
 	else if (strcmp(name, "non_blocking_polls") == 0)
 	{ 
@@ -1261,7 +1576,34 @@ int i;
         }
 	else if (strcmp(name, "ms_timestamp") == 0)
 	{
-		skygw_set_highp(atoi(value));
+		skygw_set_highp(config_truth_value((char*)value));
+	}
+    else if (strcmp(name, "auth_connect_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_conn_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_connect_timeout': %s", value);
+	}
+    else if (strcmp(name, "auth_read_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_read_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_read_timeout': %s", value);
+	}
+    else if (strcmp(name, "auth_write_timeout") == 0)
+	{
+        char* endptr;
+		int intval = strtol(value, &endptr, 0);
+        if(*endptr == '\0' && intval > 0)
+            gateway.auth_write_timeout = intval;
+        else
+            skygw_log_write(LE, "Invalid timeout value for 'auth_write_timeout': %s", value);
 	}
 	else
 	{
@@ -1269,7 +1611,7 @@ int i;
 		{
 			if (strcasecmp(name, lognames[i].logname) == 0)
 			{
-				if (atoi(value))
+				if (config_truth_value((char*)value))
 					skygw_log_enable(lognames[i].logfile);
 				else
 					skygw_log_disable(lognames[i].logfile);
@@ -1325,9 +1667,12 @@ global_defaults()
 {
 	uint8_t mac_addr[6]="";
 	struct utsname uname_data;
-	gateway.n_threads = 1;
+	gateway.n_threads = get_processor_count();
 	gateway.n_nbpoll = DEFAULT_NBPOLLS;
 	gateway.pollsleep = DEFAULT_POLLSLEEP;
+    gateway.auth_conn_timeout = DEFAULT_AUTH_CONNECT_TIMEOUT;
+    gateway.auth_read_timeout = DEFAULT_AUTH_READ_TIMEOUT;
+    gateway.auth_write_timeout = DEFAULT_AUTH_WRITE_TIMEOUT;
 	if (version_string != NULL)
 		gateway.version_string = strdup(version_string);
 	else
@@ -1415,6 +1760,7 @@ SERVER			*server;
 					char *connection_timeout;
 
 					char* auth_all_servers;
+					char* optimize_wildcard;
 					char* strip_db_esc;
 					char* max_slave_conn_str;
 					char* max_slave_rlag_str;
@@ -1430,9 +1776,22 @@ SERVER			*server;
 								"passwd");
                     
 					auth_all_servers = config_get_value(obj->parameters, "auth_all_servers");
+					optimize_wildcard = config_get_value(obj->parameters, "optimize_wildcard");
 					strip_db_esc = config_get_value(obj->parameters, "strip_db_esc");
 					version_string = config_get_value(obj->parameters, "version_string");
 					allow_localhost_match_wildcard_host = config_get_value(obj->parameters, "localhost_match_wildcard_host");
+
+                    CONFIG_PARAMETER* param;
+
+                    if((param = config_get_param(obj->parameters, "ignore_databases")))
+                    {
+                        service_set_param_value(service, param, param->value, 0, STRING_TYPE);
+                    }
+
+                    if((param = config_get_param(obj->parameters, "ignore_databases_regex")))
+                    {
+                        service_set_param_value(service, param, param->value, 0, STRING_TYPE);
+                    }
 
 					if (version_string) {
 						if (service->version_string) {
@@ -1446,21 +1805,23 @@ SERVER			*server;
                                                                user,
                                                                auth);
 						if (enable_root_user)
-							serviceEnableRootUser(service, atoi(enable_root_user));
+							serviceEnableRootUser(service, config_truth_value(enable_root_user));
 
 						if (connection_timeout)
-							serviceSetTimeout(service, atoi(connection_timeout));
+							serviceSetTimeout(service, config_truth_value(connection_timeout));
 
 
                                                 if(auth_all_servers)
-                                                    serviceAuthAllServers(service, atoi(auth_all_servers));
+                                                    serviceAuthAllServers(service, config_truth_value(auth_all_servers));
+						if(optimize_wildcard)
+                                                    serviceOptimizeWildcard(service, config_truth_value(optimize_wildcard));
 						if(strip_db_esc)
-                                                    serviceStripDbEsc(service, atoi(strip_db_esc));
+                                                    serviceStripDbEsc(service, config_truth_value(strip_db_esc));
 
 						if (allow_localhost_match_wildcard_host)
 							serviceEnableLocalhostMatchWildcardHost(
 								service,
-								atoi(allow_localhost_match_wildcard_host));
+								config_truth_value(allow_localhost_match_wildcard_host));
                                                 
                                                 /** Read, validate and set max_slave_connections */        
                                                 max_slave_conn_str = 
@@ -1563,8 +1924,6 @@ SERVER			*server;
 					char *enable_root_user;
 					char *connection_timeout;
 					char *allow_localhost_match_wildcard_host;
-					char *auth_all_servers;
-					char *strip_db_esc;
 
 					enable_root_user = 
                                                 config_get_value(obj->parameters, 
@@ -1572,13 +1931,6 @@ SERVER			*server;
 
 					connection_timeout = config_get_value(obj->parameters,
                                                           "connection_timeout");
-					
-					auth_all_servers = 
-                                                config_get_value(obj->parameters, 
-                                                                 "auth_all_servers");
-					strip_db_esc = 
-                                                config_get_value(obj->parameters, 
-                                                                 "strip_db_esc");
 
 					allow_localhost_match_wildcard_host = 
 						config_get_value(obj->parameters, "localhost_match_wildcard_host");
@@ -1596,7 +1948,7 @@ SERVER			*server;
                                                                user,
                                                                auth);
 						if (enable_root_user)
-							serviceEnableRootUser(obj->element, atoi(enable_root_user));
+							serviceEnableRootUser(obj->element, config_truth_value(enable_root_user));
 
 						if (connection_timeout)
 							serviceSetTimeout(obj->element, atoi(connection_timeout));
@@ -1604,7 +1956,7 @@ SERVER			*server;
 						if (allow_localhost_match_wildcard_host)
 							serviceEnableLocalhostMatchWildcardHost(
 								obj->element,
-								atoi(allow_localhost_match_wildcard_host));
+								config_truth_value(allow_localhost_match_wildcard_host));
                                         }
 				}
 			}
@@ -1649,6 +2001,9 @@ SERVER			*server;
 					obj->element = server_alloc(address,
                                                                     protocol,
                                                                     atoi(port));
+
+					server_set_unique_name(obj->element, obj->object);
+
 					if (obj->element && monuser && monpw)
                                         {
 						serverAddMonUser(obj->element,
@@ -1826,6 +2181,7 @@ static char *service_params[] =
                 "enable_root_user",
                 "connection_timeout",
                 "auth_all_servers",
+		"optimize_wildcard",
                 "strip_db_esc",
                 "localhost_match_wildcard_host",
                 "max_slave_connections",
@@ -1835,6 +2191,14 @@ static char *service_params[] =
                 "version_string",
                 "filters",
                 "weightby",
+		"ssl_cert",
+		"ssl_ca_cert",
+		"ssl",
+		"ssl_key",
+		"ssl_version",
+		"ssl_cert_verify_depth",
+        "ignore_databases",
+        "ignore_databases_regex",
                 NULL
         };
 
@@ -1856,6 +2220,9 @@ static char *monitor_params[] =
                 "servers",
                 "user",
                 "passwd",
+		"script",
+		"events",
+		"mysql51_replication",
 		"monitor_interval",
 		"detect_replication_lag",
 		"detect_stale_master",
@@ -1863,6 +2230,8 @@ static char *monitor_params[] =
 		"backend_connect_timeout",
 		"backend_read_timeout",
 		"backend_write_timeout",
+		"available_when_donor",
+                "disable_master_role_setting",
                 NULL
         };
 /**
@@ -1976,21 +2345,46 @@ bool config_set_qualified_param(
 int
 config_truth_value(char *str)
 {
-	if (strcasecmp(str, "true") == 0 || strcasecmp(str, "on") == 0 || strcasecmp(str, "yes") == 0)
+	if (strcasecmp(str, "true") == 0 || strcasecmp(str, "on") == 0 ||
+	 strcasecmp(str, "yes") == 0 || strcasecmp(str, "1") == 0)
 	{
 		return 1;
 	}
-	if (strcasecmp(str, "false") == 0 || strcasecmp(str, "off") == 0 || strcasecmp(str, "no") == 0)
+	if (strcasecmp(str, "false") == 0 || strcasecmp(str, "off") == 0 ||
+	 strcasecmp(str, "no") == 0|| strcasecmp(str, "0") == 0)
 	{
 		return 0;
 	}
-	return atoi(str);
+	skygw_log_write(LOGFILE_ERROR,"Error: Not a boolean value: %s",str);
+	return -1;
+}
+
+
+/**
+ * Converts a string into a floating point representation of a percentage value.
+ * For example 75% is converted to 0.75 and -10% is converted to -0.1.
+ * @param	str	String to convert
+ * @return	String converted to a floating point percentage
+ */
+double
+config_percentage_value(char *str)
+{
+    double value = 0;
+
+    value = strtod(str,NULL);
+    if(value != 0)
+	value /= 100.0;
+
+    return value;
 }
 
 static char *InternalRouters[] = {
-	"debugcli",
-	"cli",
-	NULL
+    "debugcli",
+    "cli",
+    "maxinfo",
+    "binlogrouter",
+    "testroute",
+    NULL
 };
 
 /**
@@ -2000,18 +2394,16 @@ static char *InternalRouters[] = {
  * @param router	The router name
  * @return	Non-zero if the router is in the InternalRouters table
  */
-static int
-internalService(char *router)
+bool
+isInternalService(char *router)
 {
-int	i;
-
 	if (router)
 	{
-		for (i = 0; InternalRouters[i]; i++)
+		for (int i = 0; InternalRouters[i]; i++)
 			if (strcmp(router, InternalRouters[i]) == 0)
-				return 1;
+				return true;
 	}
-	return 0;
+	return false;
 }
 /**
  * Get the MAC address of first network interface
@@ -2039,6 +2431,7 @@ config_get_ifaddr(unsigned char *output)
 	ifc.ifc_len = sizeof(buf);
 	ifc.ifc_buf = buf;
 	if (ioctl(sock, SIOCGIFCONF, &ifc) == -1) {
+		close(sock);
 		return 0;
 	}
 
@@ -2055,6 +2448,7 @@ config_get_ifaddr(unsigned char *output)
 				}
 			}
 		} else {
+		    close(sock);
 			return 0;
 		}
 	}
@@ -2248,4 +2642,147 @@ void config_add_param(CONFIG_CONTEXT* obj, char* key,char* value)
     nptr->value = strdup(value);
     nptr->next = obj->parameters;
     obj->parameters = nptr;
+}
+/**
+ * Return the pointer to the global options for MaxScale.
+ * @return Pointer to the GATEWAY_CONF structure. This is a static structure and
+ * should not be modified.
+ */
+GATEWAY_CONF* config_get_global_options()
+{
+    return &gateway;
+}
+
+/**
+ * Check if sections are defined multiple times in the configuration file.
+ * @param config Path to the configuration file
+ * @return True if duplicate sections were found or an error occurred
+ */
+bool config_has_duplicate_sections(const char* config)
+{
+    bool rval = false;
+    const int table_size = 10;
+    int errcode;
+    PCRE2_SIZE erroffset;
+    HASHTABLE *hash = hashtable_alloc(table_size, simple_str_hash, strcmp);
+    pcre2_code *re = pcre2_compile((PCRE2_SPTR) "^\\s*\\[(.+)\\]\\s*$", PCRE2_ZERO_TERMINATED,
+                                   0, &errcode, &erroffset, NULL);
+    pcre2_match_data *mdata;
+    int size = 1024;
+    char *buffer = malloc(size * sizeof(char));
+
+    if (buffer && hash && re &&
+        (mdata = pcre2_match_data_create_from_pattern(re, NULL)))
+    {
+        hashtable_memory_fns(hash, (HASHMEMORYFN) strdup, NULL,
+                             (HASHMEMORYFN) free, NULL);
+        FILE* file = fopen(config, "r");
+
+        if (file)
+        {
+            while (maxscale_getline(&buffer, &size, file) > 0)
+            {
+                if (pcre2_match(re, (PCRE2_SPTR) buffer,
+                                PCRE2_ZERO_TERMINATED, 0, 0,
+                                mdata, NULL) > 0)
+                {
+                    /**
+                     * Neither of the PCRE2 calls will fail since we know the pattern
+                     * beforehand and we allocate enough memory from the stack
+                     */
+                    PCRE2_SIZE len;
+                    pcre2_substring_length_bynumber(mdata, 1, &len);
+                    len += 1; /** one for the null terminator */
+                    PCRE2_UCHAR section[len];
+                    pcre2_substring_copy_bynumber(mdata, 1, section, &len);
+
+                    if (hashtable_add(hash, section, "") == 0)
+                    {
+                        skygw_log_write(LE, "Error: Duplicate section found: %s",
+                                        section);
+                        rval = true;
+                    }
+                }
+            }
+            fclose(file);
+        }
+        else
+        {
+            char errbuf[STRERROR_BUFLEN];
+            skygw_log_write(LE, "Error: Failed to open file '%s': %s", config,
+                            strerror_r(errno, errbuf, sizeof(errbuf)));
+            rval = true;
+        }
+    }
+    else
+    {
+        skygw_log_write(LE, "Error: Failed to allocate enough memory when checking"
+                        " for duplicate sections in configuration file.");
+        rval = true;
+    }
+
+    hashtable_free(hash);
+    pcre2_code_free(re);
+    pcre2_match_data_free(mdata);
+    free(buffer);
+    return rval;
+}
+
+
+/**
+ * Read from a FILE pointer until a newline character or the end of the file is found.
+ * The provided buffer will be reallocated if it is too small to store the whole
+ * line. The size after the reallocation will be stored in @c size. The read line
+ * will be stored in @c dest and it will always be null terminated. The newline
+ * character will not be copied into the buffer.
+ * @param dest Pointer to a buffer of at least @c size bytes
+ * @param size Size of the buffer
+ * @param file A valid file stream
+ * @return When a complete line was successfully read the function returns 1. If
+ * the end of the file was reached before any characters were read the return value
+ * will be 0. If the provided buffer could not be reallocated to store the complete
+ * line the original size will be retained, everything read up to this point
+ * will be stored in it as a null terminated string and -1 will be returned.
+ */
+int maxscale_getline(char** dest, int* size, FILE* file)
+{
+    char* destptr = *dest;
+    int offset = 0;
+
+    if (feof(file))
+    {
+        return 0;
+    }
+
+    while (true)
+    {
+        if (*size <= offset)
+        {
+            char* tmp = (char*) realloc(destptr, *size * 2);
+            if (tmp)
+            {
+                destptr = tmp;
+                *size *= 2;
+            }
+            else
+            {
+                skygw_log_write(LE, "Error: Failed to reallocate memory from %d"
+                                " bytes to %d bytes when reading from file.",
+                                *size, *size * 2);
+                destptr[offset - 1] = '\0';
+                *dest = destptr;
+                return -1;
+            }
+        }
+
+        if ((destptr[offset] = fgetc(file)) == '\n' || feof(file))
+        {
+            destptr[offset] = '\0';
+            break;
+        }
+        offset++;
+    }
+
+    *dest = destptr;
+    return 1;
 }

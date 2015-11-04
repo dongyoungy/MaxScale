@@ -28,11 +28,14 @@
  *
  * @endverbatim
  */
+#ifndef PCRE2_CODE_UNIT_WIDTH
+#define PCRE2_CODE_UNIT_WIDTH 8
+#endif
 
 #include <dcb.h>
 #include <hashtable.h>
 #include <mysql_client_server_protocol.h>
-
+#include <pcre2.h>
 /**
  * Bitmask values for the router session's initialization. These values are used
  * to prevent responses from internal commands being forwarded to the client.
@@ -42,9 +45,36 @@ typedef enum init_mask
   INIT_READY = 0x0,
   INIT_MAPPING = 0x1,
   INIT_USE_DB = 0x02,
-  INIT_UNINT = 0x04
-
+  INIT_UNINT = 0x04,
+  INIT_FAILED = 0x08
 } init_mask_t;
+
+typedef enum showdb_response
+{
+    SHOWDB_FULL_RESPONSE,
+    SHOWDB_PARTIAL_RESPONSE,
+    SHOWDB_DUPLICATE_DATABASES,
+    SHOWDB_FATAL_ERROR
+} showdb_response_t;
+
+enum shard_map_state
+{
+    SHMAP_UNINIT, /*< No databases have been added to this shard map */
+    SHMAP_READY, /*< All available databases have been added */
+    SHMAP_STALE /*< The shard map has old data or has not been updated recently */
+};
+
+/**
+ * A map of the shards tied to a single user.
+ */
+typedef struct shard_map
+{
+    HASHTABLE *hash; /*< A hashtable of database names and the servers which
+                       * have these databases. */
+    SPINLOCK lock;
+    time_t last_updated;
+    enum shard_map_state state; /*< State of the shard map */
+} shard_map_t;
 
 /** 
  * The state of the backend server reference
@@ -64,6 +94,10 @@ typedef enum bref_state {
 #define BREF_IS_CLOSED(s)           ((s)->bref_state & BREF_CLOSED)
 #define BREF_IS_MAPPED(s)           ((s)->bref_mapped)
 
+#define SCHEMA_ERR_DUPLICATEDB 5000
+#define SCHEMA_ERRSTR_DUPLICATEDB "DUPDB"
+#define SCHEMA_ERR_DBNOTFOUND 1049
+#define SCHEMA_ERRSTR_DBNOTFOUND "42000"
 /** 
  * The type of the backend server
  */
@@ -136,6 +170,7 @@ typedef struct mysql_sescmd_st {
         GWBUF*             my_sescmd_buf;        /*< Query buffer */
         unsigned char      my_sescmd_packet_type;/*< Packet type */
 	bool               my_sescmd_is_replied; /*< Is cmd replied to client */
+        int      position; /*< Position of this command */
 #if defined(SS_DEBUG)
         skygw_chk_t        my_sescmd_chk_tail;
 #endif
@@ -170,6 +205,7 @@ typedef struct sescmd_cursor_st {
 	rses_property_t**  scmd_cur_ptr_property; /*< address of pointer to owner property */
 	mysql_sescmd_t*    scmd_cur_cmd;          /*< pointer to current session command */
 	bool               scmd_cur_active;       /*< true if command is being executed */
+        int      position; /*< Position of this cursor */
 #if defined(SS_DEBUG)
 	skygw_chk_t        scmd_cur_chk_tail;
 #endif
@@ -215,10 +251,13 @@ typedef struct backend_ref_st {
 #if defined(SS_DEBUG)
         skygw_chk_t     bref_chk_top;
 #endif
+        int             n_mapping_eof;
+        GWBUF*          map_queue;
         BACKEND*        bref_backend; /*< Backend server */
         DCB*            bref_dcb; /*< Backend DCB */
         bref_state_t    bref_state; /*< State of the backend */
         bool            bref_mapped; /*< Whether the backend has been mapped */
+        bool            last_sescmd_replied;
         int             bref_num_result_wait; /*< Number of not yet received results */
         sescmd_cursor_t bref_sescmd_cur; /*< Session command cursor */
 	GWBUF*          bref_pending_cmd; /*< For stmt which can't be routed due active sescmd execution */
@@ -233,9 +272,31 @@ typedef struct backend_ref_st {
 typedef struct schemarouter_config_st {
         int               rw_max_slave_conn_percent;
         int               rw_max_slave_conn_count;
-	target_t          rw_use_sql_variables_in;	
+	target_t          rw_use_sql_variables_in;
+        int max_sescmd_hist;
+        bool disable_sescmd_hist;
+        time_t last_refresh; /*< Last time the database list was refreshed */
+        double refresh_min_interval; /*< Minimum required interval between refreshes of databases */
+        bool refresh_databases; /*< Are databases refreshed when they are not found in the hashtable */
+        bool debug; /*< Enable verbose debug messages to clients */
 } schemarouter_config_t;
-     
+
+/**
+ * The statistics for this router instance
+ */
+typedef struct {
+	int		n_queries;	/*< Number of queries forwarded    */
+        int             n_sescmd;       /*< Number of session commands */
+        int             longest_sescmd; /*< Longest chain of stored session commands */
+        int             n_hist_exceeded;/*< Number of sessions that exceeded session
+                                         * command history limit */
+        int sessions;
+        double          ses_longest;      /*< Longest session */
+        double          ses_shortest; /*< Shortest session */
+        double          ses_average; /*< Average session length */
+        int             shmap_cache_hit; /*< Shard map was found from the cache */
+        int             shmap_cache_miss;/*< No shard map found from the cache */
+} ROUTER_STATS;
 
 /**
  * The client session structure used within this router.
@@ -260,33 +321,27 @@ struct router_client_session {
         bool             rses_transaction_active; /*< Is a transaction active */
 	struct router_instance	 *router;	/*< The router instance */
         struct router_client_session* next; /*< List of router sessions */
-        HASHTABLE*      dbhash; /*< Database hash containing names of the databases mapped to the servers that contain them */
+        shard_map_t*      shardmap; /*< Database hash containing names of the databases mapped to the servers that contain them */
         char            connect_db[MYSQL_DATABASE_MAXLEN+1]; /*< Database the user was trying to connect to */
+        char            current_db[MYSQL_DATABASE_MAXLEN + 1]; /*< Current active database */
         init_mask_t    init; /*< Initialization state bitmask */
         GWBUF*          queue; /*< Query that was received before the session was ready */
         DCB*            dcb_route; /*< Internal DCB used to trigger re-routing of buffers */
         DCB*            dcb_reply; /*< Internal DCB used to send replies to the client */
+        ROUTER_STATS    stats;     /*< Statistics for this router         */
+        int             n_sescmd;
+        int             pos_generator;
 #if defined(SS_DEBUG)
         skygw_chk_t      rses_chk_tail;
 #endif
 };
-
-/**
- * The statistics for this router instance
- */
-typedef struct {
-	int		n_sessions;	/*< Number sessions created        */
-	int		n_queries;	/*< Number of queries forwarded    */
-	int		n_master;	/*< Number of stmts sent to master */
-	int		n_slave;	/*< Number of stmts sent to slave  */
-	int		n_all;		/*< Number of stmts sent to all    */
-} ROUTER_STATS;
 
 
 /**
  * The per instance data for the router.
  */
 typedef struct router_instance {
+	HASHTABLE*              shard_maps;  /*< Shard maps hashed by user name */
 	SERVICE*                service;     /*< Pointer to service                 */
 	ROUTER_CLIENT_SES*      connections; /*< List of client connections         */
 	SPINLOCK                lock;	     /*< Lock for the instance data         */
@@ -299,15 +354,17 @@ typedef struct router_instance {
 	ROUTER_STATS            stats;       /*< Statistics for this router         */
         struct router_instance* next;        /*< Next router on the list            */
 	bool			available_slaves; /*< The router has some slaves available */
-	//HASHTABLE* dbnames_hash; /** Hashtable containing the database names and where to find them */
-	//char** ignore_list;
+    HASHTABLE*              ignored_dbs; /*< List of databases to ignore when the
+                                          * database mapping finds multiple servers
+                                          * with the same database */
+    pcre2_code*                   ignore_regex; /*< Databases matching this regex will
+                                           * not cause the session to be terminated
+                                           * if they are found on more than one server. */
+    pcre2_match_data*             ignore_match_data;
+
 } ROUTER_INSTANCE;
 
 #define BACKEND_TYPE(b) (SERVER_IS_MASTER((b)->backend_server) ? BE_MASTER :    \
         (SERVER_IS_SLAVE((b)->backend_server) ? BE_SLAVE :  BE_UNDEFINED));
-#if 0
-void* dbnames_hash_init(ROUTER_INSTANCE* inst,BACKEND** backends);
-bool update_dbnames_hash(ROUTER_INSTANCE* inst,BACKEND** backends, HASHTABLE* hashtable);
-#endif
 
 #endif /*< _SCHEMAROUTER_H */

@@ -141,25 +141,28 @@ setipaddress(struct in_addr *a, char *p) {
  * Daemonize the process by forking and putting the process into the
  * background.
  */
-void gw_daemonize(void) {
+bool gw_daemonize(void) {
 	pid_t pid;
 
 	pid = fork();
 
 	if (pid < 0) {
-		fprintf(stderr, "fork() error %s\n", strerror(errno));
+                char errbuf[STRERROR_BUFLEN];
+		fprintf(stderr, "fork() error %s\n", strerror_r(errno, errbuf, sizeof(errbuf)));
 		exit(1);
 	}
 
 	if (pid != 0) {
 		/* exit from main */
-		exit(0);
+		return true;
 	}
 
 	if (setsid() < 0) {
-		fprintf(stderr, "setsid() error %s\n", strerror(errno));
+                char errbuf[STRERROR_BUFLEN];
+                fprintf(stderr, "setsid() error %s\n", strerror_r(errno, errbuf, sizeof(errbuf)));
 		exit(1);
 	}
+        return false;
 }
 
 /**
@@ -222,4 +225,24 @@ struct hostent		*hp;
 	addr->sin_family = AF_INET;
 	addr->sin_port = htons(pnum);
 	return 1;
+}
+
+/**
+ * Return the number of processors available.
+ * @return Number of processors or 1 if the required definition of _SC_NPROCESSORS_CONF
+ * is not found
+ */
+long get_processor_count()
+{
+    long processors = 1;
+#ifdef _SC_NPROCESSORS_ONLN
+    if ((processors = sysconf(_SC_NPROCESSORS_ONLN)) <= 0)
+    {
+        skygw_log_write(LE, "Unable to establish the number of available cores. Defaulting to 4.");
+        processors = 4;
+    }
+#else
+#error _SC_NPROCESSORS_ONLN not available.
+#endif
+    return processors;
 }

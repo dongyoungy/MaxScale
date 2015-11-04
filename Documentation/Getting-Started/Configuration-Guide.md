@@ -2,7 +2,7 @@
 
 ## Introduction
 
-The purpose of this document is to describe how to configure MaxScale and to discuss some possible usage scenarios for MaxScale. MaxScale is designed with flexibility in mind, and consists of an event processing core with various support functions and plugin modules that tailor the behaviour of the MaxScale itself.
+The purpose of this document is to describe how to configure MaxScale and to discuss some possible usage scenarios for MaxScale. MaxScale is designed with flexibility in mind, and consists of an event processing core with various support functions and plugin modules that tailor the behavior of the MaxScale itself.
 
 ### Terms
 
@@ -22,28 +22,56 @@ connection failover| When a connection currently being used between MaxScale and
   backend database | A term used to refer to a database that sits behind MaxScale and is accessed by applications via MaxScale.
             filter | A module that can be placed between the client and the MaxScale router module. All client data passes through the filter module and may be examined or modified by the filter modules.  Filters may be chained together to form processing pipelines.
 
+# Table of Contents
+
+* [Configuration](#configuration)
+  * [Global Settings](#global-settings)
+  * [Service](#service)
+    * [Service and SSL](#service-and-ssl)
+  * [Server](#server)
+  * [Listener](#listener)
+  * [Filter](#filter)
+  * [Monitor](#monitor)
+  * [Protocol](#protocol)
+* [Router Modules](#router-modules)
+* [Monitor Modules](#monitor-modules)
+* [Filter Modules](#filter-modules)
+* [Reloading Configuration](#reloading-configuration)
+* [Authentication](#authentication)
+* [Error Reporting](#error-reporting)
 
 ## Configuration
 
 The MaxScale configuration is read from a file which can be located in a number of placing, MaxScale will search for the configuration file in a number of locations.
 
-1. If the environment variable `MAXSCALE_HOME` is set then MaxScale will look for a configuration file called `MaxScale.cnf` in the directory `$MAXSCALE_HOME/etc`.
+1. Location given with the --configdir=<path> command line argument
 
-2. If `MAXSCALE_HOME` is not set or the configuration file is not in the location above MaxScale will look for a file in `/etc/MaxScale.cnf`.
-
-Alternatively MaxScale can be started with the `-c` flag and the path of the MaxScale home directory tree.
+2. MaxScale will look for a configuration file called `maxscale.cnf` in the directory `/etc/maxscale.cnf`
 
 An explicit path to a configuration file can be passed by using the `-f` option to MaxScale.
 
-The configuration file itself is based on the ".ini" file format and consists of various sections that are used to build the configuration, these sections define services, servers, listeners, monitors and global settings.
+The configuration file itself is based on the ".ini" file format and consists of various sections that are used to build the configuration, these sections define services, servers, listeners, monitors and global settings. Parameters which expect a comma-separated list of values can be defined on multiple lines. The following is an example of a multi-line definition.
+
+```
+[MyService]
+type=service
+router=readconnroute
+servers=server1,
+        server2,
+        server3
+```
+
+The values of the parameter that are not on the first line need to have at least one whitespace character before them in order for them to be recognized as a part of the multi-line parameter.
+
+Please see the section about [Protocol Modules](#protocol-modules) for more details about MaxScale and the default directories where modules will be searched for.
 
 ### Global Settings
 
-The global settings, in a section named `[MaxScale]`, allow various parameters that affect MaxScale as a whole to be tuned. Currently the only setting that is supported is the number of threads to use to handle the network traffic. MaxScale will also accept the section name of `[gateway]` for global settings. This is for backward compatibility with versions prior to the naming of MaxScale.
+The global settings, in a section named `[MaxScale]`, allow various parameters that affect MaxScale as a whole to be tuned.
 
 #### `threads`
 
-To control the number of threads that poll for network traffic set the parameter threads to a number. It is recommended that you start with a single thread and add more as you find the performance is not satisfactory. MaxScale is implemented to be very thread efficient, so a small number of threads is usually adequate to support reasonably heavy workloads.  Adding more threads may not improve performance and can consume resources needlessly.
+This parameter controls the number of worker threads that are handling the events coming from the kernel. MaxScale will auto-detect the number of processors of the system unless number of threads is manually configured. It is recommended that you let MaxScale detect how many cores the system has and leave this parameter undefined. The number of used cores will be logged into the message logs and if you are not satisfied with the auto-detected value, you can manually configure it. Increasing the amount of worker threads beyond the number of processor cores does not improve performance and can consume resources needlessly.
 
 ```
 # Valid options are:
@@ -54,6 +82,18 @@ threads=1
 ```
 
 It should be noted that additional threads will be created to execute other internal services within MaxScale. This setting is used to configure the number of threads that will be used to manage the user connections.
+
+#### `auth_connect_timeout`
+
+The connection timeout in seconds for the MySQL connections to the backend server when user authentication data is fetched. Increasing the value of this parameter will cause MaxScale to wait longer for a response from the backend server before aborting the authentication process.
+
+#### `auth_read_timeout`
+
+The read timeout in seconds for the MySQL connection to the backend database when user authentication data is fetched. Increasing the value of this parameter will cause MaxScale to wait longer for a response from the backend server when user data is being actively fetched. If the authentication is failing and you either have a large number of database users and grants or the connection to the backend servers is slow, it is a good idea to increase this value.
+
+#### `auth_write_timeout`
+
+The write timeout in seconds for the MySQL connection to the backend database when user authentication data is fetched. Currently MaxScale does not write or modify the data in the backend server.
 
 #### `ms_timestamp`
 
@@ -101,6 +141,66 @@ log_debug=1
 
 To disable the log use the value 0 and to enable it use the value 1.
 
+#### `log_augmentation`
+
+Enable or disable the augmentation of messages. If this is enabled, then each logged message is appended with the name of the function where the message was logged. This is primarily for development purposes and hence is disabled by default.
+
+```
+# Valid options are:
+#       log_augmentation=<0|1>
+log_augmentation=1
+```
+
+To disable the augmentation use the value 0 and to enable it use the value 1.
+
+#### `logdir`
+
+Set the directory where the logfiles are stored. The folder needs to be both readable and writable by the user running MaxScale.
+
+```
+logdir=/tmp/
+```
+
+#### `datadir`
+
+Set the directory where the data files used by MaxScale are stored. Modules can write to this directory and for example the binlogrouter uses this folder as the default location for storing binary logs.
+
+```
+datadir=/home/user/maxscale_data/
+```
+
+#### `libdir`
+
+Set the directory where MaxScale looks for modules. The library directory is the only directory that MaxScale uses when it searches for modules. If you have custom modules for MaxScale, make sure you have them in this folder.
+
+```
+libdir=/home/user/lib64/
+```
+
+#### `cachedir`
+
+Configure the directory MaxScale uses to store cached data. An example of cached data is the authentication data fetched from the backend servers. MaxScale stores this in case a connection to the backend server is not possible.
+
+```
+cachedir=/tmp/maxscale_cache/
+```
+
+#### `piddir`
+
+Configure the directory for the PID file for MaxScale. This file contains the Process ID for the running MaxScale process.
+
+```
+piddir=/tmp/maxscale_cache/
+```
+
+#### `language`
+
+Set the folder where the errmsg.sys file is located in. MaxScale will look for the errmsg.sys file installed with MaxScale from this folder.
+
+```
+language=/home/user/lang/
+```
+
 ### Service
 
 A service represents the database service that MaxScale offers to the clients. In general a service consists of a set of backend database servers and a routing algorithm that determines how MaxScale decides to send statements or route connections to those backend servers.
@@ -120,7 +220,7 @@ In order for MaxScale to forward any requests it must have at least one service 
 
 #### `router`
 
-The router parameter of a service defines the name of the router module that will be used to implement the routing algorithm between the client of MaxScale and the backend databases. Additionally routers may also be passed a comma separated list of options that are used to control the behaviour of the routing algorithm. The two parameters that control the routing choice are router and router_options. The router options are specific to a particular router and are used to modify the behaviour of the router. The read connection router can be passed options of master, slave or synced, an example of configuring a service to use this router and limiting the choice of servers to those in slave state would be as follows.
+The router parameter of a service defines the name of the router module that will be used to implement the routing algorithm between the client of MaxScale and the backend databases. Additionally routers may also be passed a comma separated list of options that are used to control the behavior of the routing algorithm. The two parameters that control the routing choice are router and router_options. The router options are specific to a particular router and are used to modify the behavior of the router. The read connection router can be passed options of master, slave or synced, an example of configuring a service to use this router and limiting the choice of servers to those in slave state would be as follows.
 
 ```
 router=readconnroute
@@ -184,16 +284,16 @@ Query OK, 0 rows affected (0.00 sec)
 Additionally, `GRANT SELECT` on the `mysql.db` table and `SHOW DATABASES` privileges are required in order to load databases name and grants suitable for database name authorization.
 
 ```
-MariaDB [(none)]> GRANT SELECT ON mysql.db TO 'username'@'maxscalehost';
+MariaDB [(none)]> GRANT SELECT ON mysql.db TO 'maxscale'@'maxscalehost';
 Query OK, 0 rows affected (0.00 sec)
 
-MariaDB [(none)]> GRANT SHOW DATABASES ON *.* TO 'username'@'maxscalehost';
+MariaDB [(none)]> GRANT SHOW DATABASES ON *.* TO 'maxscale'@'maxscalehost';
 Query OK, 0 rows affected (0.00 sec)
 ```
 
 #### `passwd`
 
-The passwd parameter provides the password information for the above user and may be either a plain text password or it may be an encrypted password.  See the section on encrypting passwords for use in the MaxScale.cnf file. This user must be capable of connecting to the backend database and executing these SQL statements to load database names and grants from the backends:
+The passwd parameter provides the password information for the above user and may be either a plain text password or it may be an encrypted password.  See the section on encrypting passwords for use in the maxscale.cnf file. This user must be capable of connecting to the backend database and executing these SQL statements to load database names and grants from the backends:
 
 * `SELECT user, host, password,Select_priv FROM mysql.user`.
 * `SELECT user, host, db FROM mysql.db`
@@ -263,6 +363,14 @@ The strip_db_esc parameter strips escape characters from database names of grant
 
 This parameter takes a boolean value and when enabled, will strip all `\` characters from the database names.
 
+#### `optimize_wildcard`
+
+Enabling this feature will transform wildcard grants to individual database grants. This will consume more memory but authentication in MaxScale will be done faster. The parameter takes a boolean value.
+
+#### `retry_on_failure`
+
+The retry_on_failure parameter controls whether MaxScale will try to restart failed services and accepts a boolean value. This functionality is enabled by default to prevent services being permanently disabled if the starting of the service failed due to a network outage. Disabling the restarting of the failed services will cause them to be permanently disabled if the services can't be started when MaxScale is started.
+
 #### `connection_timeout`
 
 The connection_timeout parameter is used to disconnect sessions to MaxScale that have been idle for too long. The session timeouts are disabled by default. To enable them, define the timeout in seconds in the service's configuration section.
@@ -273,6 +381,62 @@ Example:
 [Test Service]
 connection_timeout=300
 ```
+
+### Service and SSL
+
+This section describes configuration parameters for services that control the SSL/TLS encryption method and the various certificate files involved in it. To enable SSL, you must configure the `ssl` parameter with either `enabled` or `required` and provide the three files for `ssl_cert`, `ssl_key` and `ssl_ca_cert`. After this, MySQL connections to this service can be encrypted with SSL.
+
+#### `ssl`
+
+This enables SSL connections to the service. If this parameter is set to either `required` or `enabled` and the three certificate files can be found (these are explained afterwards), then client connections will be encrypted with SSL. If the parameter is `enabled` then both SSL and non-SSL connections can connect to this service. If the parameter is set to `required` then only SSL connections can be used for this service and non-SSL connections will get an error when they try to connect to the service.
+
+#### `ssl_key`
+
+The SSL private key the service should use. This will be the private key that is used as the server side private key during a client-server SSL handshake. This is a required parameter for SSL enabled services.
+
+#### `ssl_cert`
+
+The SSL certificate the service should use. This will be the public certificate that is used as the server side certificate during a client-server SSL handshake. This is a required parameter for SSL enabled services.
+
+#### `ssl_ca_cert`
+
+This is the Certificate Authority file. It will be used to verify that both the client and the server certificates are valid. This is a required parameter for SSL enabled services.
+
+### `ssl_version`
+
+This parameter controls the level of encryption used. Accepted values are:
+ * SSLv3
+ * TLSv10
+ * TLSv11
+ * TLSv12
+ * MAX   
+
+### `ssl_cert_verification_depth`
+
+The maximum length of the certificate authority chain that will be accepted. Accepted values are positive integers.
+
+```
+# Example
+ssl_cert_verification_depth=10
+```
+
+Example SSL enabled service configuration:
+
+```
+[ReadWriteSplitService]
+type=service
+router=readwritesplit
+servers=server1,server2,server3
+user=myuser
+passwd=mypasswd
+ssl=required
+ssl_cert=/home/markus/certs/server-cert.pem
+ssl_key=/home/markus/certs/server-key.pem
+ssl_ca_cert=/home/markus/certs/ca.pem
+ssl_version=TLSv12
+```
+
+This configuration requires all connections to be encrypted with SSL. It also specifies that TLSv1.2 should be used as the encryption method. The paths to the server certificate files and the Certificate Authority file are also provided.
 
 ### Server
 
@@ -314,7 +478,7 @@ The monitor has a username and password that is used to connect to all servers f
 monitorpw=mymonitorpasswd
 ```
 
-The monpasswd parameter may be either a plain text password or it may be an encrypted password.  See the section on encrypting passwords for use in the MaxScale.cnf file.
+The monpasswd parameter may be either a plain text password or it may be an encrypted password.  See the section on encrypting passwords for use in the maxscale.cnf file.
 
 ### Listener
 
@@ -351,6 +515,21 @@ The port to use to listen for incoming connections to MaxScale from the clients.
 The `socket` option may be included in a listener definition, this configures the listener to use Unix domain sockets to listen for incoming connections. The parameter value given is the name of the socket to use.
 
 If a socket option and an address option is given then the listener will listen on both the specific IP address and the Unix socket.
+
+#### `persistpoolmax`
+
+The `persistpoolmax` parameter defaults to zero but can be set to an integer value for a back end server.
+If it is non zero, then when a DCB connected to a back end server is discarded by the
+system, it will be held in a pool for reuse, remaining connected to the back end server.
+If the number of DCBs in the pool has reached the value given by `persistpoolmax` then
+any further DCB that is discarded will not be retained, but disconnected and discarded.
+
+#### `persistmaxtime`
+
+The `persistmaxtime` parameter defaults to zero but can be set to an integer value
+indicating a number of seconds. A DCB placed in the persistent pool for a server will
+only be reused if the elapsed time since it joined the pool is less than the given
+value. Otherwise, the DCB will be discarded and the connection closed.
 
 ### Filter
 
@@ -406,6 +585,8 @@ In order for the various router modules to function correctly they require infor
 
 Monitors are defined in much the same way as other elements in the configuration file, with the section name being the name of the monitor instance and the type being set to monitor.
 
+This is an example configuration of the MySQL monitor module. It is intended for Master-Slave replication clusters and allows for replication lag detection.
+
 ```
 [MySQL Monitor]
 type=monitor
@@ -421,7 +602,11 @@ backend_write_timeout=2
 # mysqlmon specific options
 detect_replication_lag=0
 detect_stale_master=0
+```
 
+Here is an example configuration of the Galera cluster monitor. It detects when nodes are in sync and also assigns master and slave roles to nodes within MaxScale, allowing it to be used with modules designed for Master-Slave replication clusters.
+
+```
 [Galera Monitor]
 type=monitor
 module=galeramon
@@ -435,6 +620,8 @@ backend_write_timeout=2
 
 # galeramon specific options
 disable_master_failback=0
+available_when_donor=0
+disable_master_role_setting=0
 ```
 
 #### `module`
@@ -445,6 +632,8 @@ The module parameter defines the name of the loadable module that implements the
 
 The servers parameter is a comma separated list of server names to monitor, these are the names defined elsewhere in the configuration file. The set of servers monitored by a single monitor need not be the same as the set of servers used within any particular server, a single monitor instance may monitor servers in multiple servers.
 
+Multiple monitors monitoring the same servers should be avoided. They can possibly make the whole cluster inoperable and a good example is the mixed use of the MySQL and the Galera monitors. The MySQL monitor requires a working Master-Slave replication for it to assign the Master and Slave roles inside MaxScale but the Galera monitor only looks for Galera specific status variables. These two monitors will cause a conflict when one tries to clear server states it sees as valid while the other is simultaneously setting new states to the rest of the servers.
+
 #### `user`
 
 The user parameter defines the username that the monitor will use to connect to the monitored databases. Depending on the monitoring module used this user will require specific privileges in order to determine the state of the nodes, details of those privileges can be found in the sections on each of the monitor modules.
@@ -453,7 +642,7 @@ Individual servers may define override values for the user and password the moni
 
 #### `passwd`
 
-The password parameter may be either a plain text password or it may be an encrypted password. See the section on encrypting passwords for use in the `MaxScale.cnf` file.
+The password parameter may be either a plain text password or it may be an encrypted password. See the section on encrypting passwords for use in the `maxscale.cnf` file.
 
 #### `monitor_interval`
 
@@ -499,6 +688,19 @@ The server status field may have the `SERVER_MASTER_STICKINESS` bit, meaning the
 
 Anyway, a new master will be selected in case of current master failure, regardless the option value.
 
+#### `available_when_donor`
+
+This option if set to 1 will allow Galera monitor to keep a node in `Donor` status in the server pool if it is using any xtrabackup method for SST, e.g. `wsrep_sst_method` equal to `xtrabackup` or `xtrabackup-v2`.
+
+As xtrabackup is a non-locking SST method, a node in `Donor` status can still be considered in sync. This option is not enabled by default and should be used as the administrator's discretion.
+
+#### `disable_master_role_setting`
+
+This option if set to 1 will stop the Galera monitor from setting the status of
+backend servers to master or slave.  It is applicable when the Galera router is
+being used to spread writes across multiple nodes, so that no server is to be
+nominated as the master.
+
 #### `backend_connect_timeout`
 
 This option, with default value of `3` sets the monitor connect timeout to backends.
@@ -511,9 +713,9 @@ Default value is `1`. Read Timeout is the timeout in seconds for each attempt to
 
 Default value is `2`. Write Timeout is the timeout in seconds for each attempt to write to the server. There is a retry if necessary, so the total effective timeout value is two times the option value. That's for `mysql_real_connect` C API.
 
-## Protocol Modules
+## Protocol
 
-The protocols supported by MaxScale are implemented as external modules that are loaded dynamically into the MaxScale core. These modules reside in the directory `$MAXSCALE_HOME/modules`, if the environment variable `$MAXSCALE_HOME` is not set it defaults to `/usr/local/mariadb-maxscale`. It may also be set by passing the `-c` option on the MaxScale command line.
+The protocols supported by MaxScale are implemented as external modules that are loaded dynamically into the MaxScale core. These modules reside in the directory `/usr/lib64/maxscale`. The location can be overridden with the `libdir=PATH` parameter under the `[maxscale]` section. It may also be set by passing the `-B PATH` or `--libdir=PATH` option on the MaxScale command line.
 
 ### MySQLClient
 
@@ -539,7 +741,7 @@ This protocol module is currently still under development, it provides a means t
 
 The main task of MaxScale is to accept database connections from client applications and route the connections or the statements sent over those connections to the various services supported by MaxScale.
 
-There are two flavours of routing that MaxScale can perform, connection based routing and statement based routine. These each have their own characteristics and costs associated with them.
+There are two flavors of routing that MaxScale can perform, connection based routing and statement based routine. These each have their own characteristics and costs associated with them.
 
 ### Connection Based Routing
 
@@ -554,6 +756,12 @@ Parsing within the router adds overhead to the cost of routing and makes this ty
 ### Available Routing Modules
 
 Currently a small number of query routers are available, these are in different stages of completion and offer different facilities.
+
+* [ReadConnRoute](../Routers/ReadConnRoute.md)
+* [ReadWriteSplit](../Routers/ReadWriteSplit.md)
+* [SchemaRouter](../Routers/SchemaRouter.md)
+
+In addition to these routing modules, the binlogrouter module can act as a binary log proxy between a master and slave servers.
 
 #### Readconnroute
 
@@ -644,7 +852,7 @@ passwd=galeramon
 
 The specialized Galera monitor can also select one of the node in the cluster as _Master_, the others will be marked as _Slave_. These roles are only assigned to _Synced_ nodes.
 
-It then possible to have services/listeners with `router_options=master` or `slave` accessing a subset of all galera nodes. The _Synced_ state simply means: access all nodes. Examples of different **readconn** router configurations for Galera:
+It then possible to have services/listeners with `router_options=master` or `slave` accessing a subset of all Galera nodes. The _Synced_ state simply means: access all nodes. Examples of different **readconn** router configurations for Galera:
 
 ```
 [Galera Master Service]
@@ -745,72 +953,7 @@ The router stores all of the executed session commands so that in case of a slav
 
 Read/Write Split router-specific settings are specified in the configuration file of MaxScale in its specific section. The section can be freely named but the name is used later as a reference from listener section.
 
-The configuration consists of mandatory and optional parameters.
-
-###### Mandatory parameters
-
-`type` specifies the type of service. For **readwritesplit** module the type is `router`:
-
-    type=router
-
-`service` specifies the router module to be used. For **readwritesplit** the value is `readwritesplit`:
-
-    service=readwritesplit
-
-`servers` provides a list of servers, which must include one master and available slaves:
-
-    servers=server1,server2,server3
-
-**NOTE: Each server on the list must have its own section in the configuration file where it is defined.**
-
-`user` is the username the router session uses for accessing backends in order to load the content of the `mysql.user` table (and `mysql.db` and database names as well) and optionally for creating, and using `maxscale_schema.replication_heartbeat` table.
-
-`passwd` specifies corresponding password for the user. Syntax for user and passwd is:
-
-```
-user=<username>
-passwd=<password>
-```
-
-###### Optional parameters
-
-`max_slave_connections` sets the maximum number of slaves a router session uses at any moment. Default value is `1`.
-
-	max_slave_connections=<max. number, or % of available slaves>
-
-`max_slave_replication_lag` specifies how many seconds a slave is allowed to be behind the master. If the lag is bigger than configured value a slave can't be used for routing.
-
-	max_slave_replication_lag=<allowed lag in seconds>
-
-This applies to Master/Slave replication with MySQL monitor and `detect_replication_lag=1` options set.
-Please note max_slave_replication_lag must be greater than monitor interval.
-
-`router_options` may include multiple **readwritesplit**-specific options. Values are either singular or parameter-value pairs. Currently available is a single option which specifies the criteria used in slave selection both in initialization of router session and per each query. Note that due to the current monitor implementation, the value specified here should be *<twice the monitor interval>* + 1.
-
-	options=slave_selection_criteria=<criteria>
-
-where *<criteria>* is one of the following:
-
-* `LEAST_GLOBAL_CONNECTIONS`, the slave with least connections in total
-* `LEAST_ROUTER_CONNECTIONS`, the slave with least connections from this router
-* `LEAST_BEHIND_MASTER`, the slave with smallest replication lag
-* `LEAST_CURRENT_OPERATIONS` (default), the slave with least active operations
-
-`use_sql_variables_in` specifies where should queries, which read session variable, be routed. The syntax for `use_sql_variable_in` is:
-
-    use_sql_variables_in=[master|all]
-
-When value all is used, queries reading session variables can be routed to any available slave (depending on selection criteria). Note, that queries modifying session variables are routed to all backend servers by default, excluding write queries with embedded session variable modifications, such as:
-
-    INSERT INTO test.t1 VALUES (@myid:=@myid+1)
-
-In above-mentioned case the user-defined variable would only be updated in the master where query would be routed due to `INSERT` statement.
-
-`max_sescmd_history` sets a limit on how many session commands each session can execute before the connection is closed. The default is an unlimited number of session commands.
-
-	max_sescmd_history=1500
-
-When a limitation is set, it effectively creates a cap on the session's memory consumption. This might be useful if connection pooling is used and the sessions use large amounts of session commands.
+The configuration consists of mandatory and optional parameters. For a complete list of these, please read the [ReadWriteSplit](../Routers/ReadWriteSplit.md) documentation.
 
 An example of Read/Write Split router configuration :
 
@@ -828,6 +971,8 @@ filters=qla|fetch|from
 ```
 
 In addition to this, readwritesplit needs configuration for a listener, for all servers listed, and for each filter. Listener, server - and filter configurations are described in their own sections in this document.
+
+An important parameter is the `max_slave_connections=50%` parameter. This sets the number of slaves each client connection will use. With the default values, client connections will only use a single slave for reads. For example, setting the parameter value to 100% will use all available slaves and read queries will be balanced evenly across all slaves. Changing the `max_slave_conections` parameter and `slave_selection_criteria` router option allows you to change the way MaxScale will balance reads. For more information about the `slave_selection_criteria` router option, please read the ReadWriteSplit documentation.
 
 Below is a listener example for the "RWSplit Service" defined above:
 
@@ -983,7 +1128,7 @@ MariaDB [mysql]> grant REPLICATION CLIENT on *.* to 'maxscalemon'@'maxscalehost'
 Query OK, 0 rows affected (0.00 sec)
 ```
 
-MySQL monitor fetches the `@@server_id` variable and other informations from `SHOW SLAVE STATUS` in order to compute the replication topology tree that may include intermediate master servers, called relay servers.
+MySQL monitor fetches the `@@server_id` variable and other information from `SHOW SLAVE STATUS` in order to compute the replication topology tree that may include intermediate master servers, called relay servers.
 
 The *Master* server used by router modules is the so called "root master": a server that has the `SERVER_MASTER` status bit set and it's at the lowest level of the replication depth.
 
@@ -995,7 +1140,7 @@ Please note, those two options are not enabled by default.
 
 ### galeramon
 
-The Galeramon monitor is a simple router designed for use with MySQL Galera cluster. To execute the galeramon monitor an entry as shown below should be added to the MaxScale configuration file.
+The Galeramon monitor is a simple monitor designed for use with MySQL Galera cluster. To execute the galeramon monitor an entry as shown below should be added to the MaxScale configuration file.
 
 ```
 [Galera Monitor]
@@ -1218,7 +1363,7 @@ before being sent to the server. Note that the text in the match string is case-
 
 The **tee** filter is a filter module for MaxScale that acts as a "plumbing" fitting in the MaxScale filter toolkit. It can be used in a filter pipeline of a service to make a copy of requests from the client and dispatch a copy of the request to another service within MaxScale.
 
-The configuration block for the **tee** filter requires the minimal filter parameters in its section within the `MaxScale.cnf` file that defines the filter to load and the service to send the duplicates to.
+The configuration block for the **tee** filter requires the minimal filter parameters in its section within the `maxscale.cnf` file that defines the filter to load and the service to send the duplicates to.
 
 ```
 [ArchiveFilter]
@@ -1233,7 +1378,7 @@ In addition parameters may be added to define patterns to match against to eithe
 
 The top filter is a filter module for MaxScale that monitors every SQL statement that passes through the filter. It measures the duration of that statement, the time between the statement being sent and the first result being returned. The top N times are kept, along with the SQL text itself and a list sorted on the execution times of the query is written to a file upon closure of the client session.
 
-The configuration block for the **top** filter requires the minimal filter options in its section within the `MaxScale.cnf` file, stored in `$MAXSCALE_HOME/etc/MaxScale.cnf`.
+The configuration block for the **top** filter requires the minimal filter options in its section within the `maxscale.cnf` file, stored in `/etc/maxscale.cnf`.
 
 ```
 [MyLogFilter]
@@ -1245,31 +1390,6 @@ count=10
 
 In addition parameters may be added to define patterns to match against to either include or exclude particular SQL statements to be duplicated. You may also define that the filter is only active for connections from a particular source or when a particular user is connected.
 
-## Encrypting Passwords
-
-Passwords stored in the MaxScale.cnf file may optionally be encrypted for added security. This is done by creation of an encryption key on installation of MaxScale. Encryption keys may be created manually by executing the maxkeys utility with the argument of the filename to store the key.
-
-    maxkeys $MAXSCALE_HOME/etc/.secrets
-
-Changing the encryption key for MaxScale will invalidate any currently encrypted keys stored in the MaxScale.cnf file.
-
-### Creating Encrypted Passwords
-
-Encrypted passwords are created by executing the maxpasswd command with the password you require to encrypt as an argument. The environment variable `MAXSCALE_HOME` must be set, or MaxScale must be installed in the default location before maxpasswd can be executed.
-
-    maxpasswd MaxScalePw001
-    61DD955512C39A4A8BC4BB1E5F116705
-
-The output of the maxpasswd command is a hexadecimal string, this should be inserted into the MaxScale.cnf file in place of the ordinary, plain text, password. MaxScale will determine this as an encrypted password and automatically decrypt it before sending it the database server.
-
-```
-[Split Service]
-type=service
-router=readwritesplit
-servers=server1,server2,server3,server4
-user=maxscale
-password=61DD955512C39A4A8BC4BB1E5F116705
-```
 
 ## Reloading Configuration
 
@@ -1308,7 +1428,7 @@ In this case the user *X* would be able to connect to MaxScale from host a givin
 
 Hostname mapping in MaxScale works in exactly the same way as for MySQL, if the wildcard is used for the host then any host other than the localhost (127.0.0.1) will match. It is important to consider that the localhost check will be performed at the MaxScale level and at the MySQL server level.
 
-If MaxScale and the databases are on separate hosts there are two important changes in behaviour to consider:
+If MaxScale and the databases are on separate hosts there are two important changes in behavior to consider:
 
 1. Clients running on the same machine as the backend database now may access the database using the wildcard entry. The localhost check between the client and MaxScale will allow the use of the wildcard, since the client is not running on the MaxScale host. Also the wildcard entry can be used on the database host as MaxScale is making that connection and it is not running on the same host as the database.
 
@@ -1341,7 +1461,7 @@ and short notations
 
 ## Error Reporting
 
-MaxScale is designed to be executed as a service, therefore all error reports, including configuration errors, are written to the MaxScale error log file. MaxScale will log to a set of files in the directory `$MAXSCALE_HOME/log`, the only exception to this is if the log directory is not writable, in which case a message is sent to the standard error descriptor.
+MaxScale is designed to be executed as a service, therefore all error reports, including configuration errors, are written to the MaxScale error log file. By default, MaxScale will log to a set of files in the directory `/var/log/maxscale`, the only exception to this is if the log directory is not writable, in which case a message is sent to the standard error descriptor.
 
 ### Troubleshooting
 
@@ -1356,11 +1476,11 @@ Example:
 ```
 [Galera Listener]
 type=listener
-address=192.1681.3.33
+address=192.168.3.33
 port=4408
 socket=/servers/maxscale/galera.sock
 ```
 
-TCP/IP Traffic must be permitted to 192.1681.3.33 port 4408
+TCP/IP Traffic must be permitted to 192.168.3.33 port 4408
 
 For Unix socket, the socket file path (example: `/servers/maxscale/galera.sock`) must be writable by the Unix user MaxScale runs as.

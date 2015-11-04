@@ -50,11 +50,7 @@
 #include <secrets.h>
 #include <mysql_client_server_protocol.h>
 #include <mysqld_error.h>
-
-
-#define DEFAULT_CONNECT_TIMEOUT 3
-#define DEFAULT_READ_TIMEOUT 1
-#define DEFAULT_WRITE_TIMEOUT 2
+#include <regex.h>
 
 #define USERS_QUERY_NO_ROOT " AND user NOT IN ('root')"
 
@@ -76,19 +72,39 @@
 	WHERE user.user IS NOT NULL AND user.user <> ''"
 
 #else
-# define LOAD_MYSQL_USERS_QUERY "SELECT user, host, password, concat(user,host,password,Select_priv) AS userdata, Select_priv AS anydb FROM mysql.user WHERE user IS NOT NULL AND user <> ''"
+# define LOAD_MYSQL_USERS_QUERY "SELECT \
+    user, host, password, concat(user,host,password,Select_priv) AS userdata, \
+    Select_priv AS anydb FROM mysql.user WHERE user IS NOT NULL AND user <> ''"
 #endif
 #define MYSQL_USERS_COUNT "SELECT COUNT(1) AS nusers FROM mysql.user"
 
 #define MYSQL_USERS_WITH_DB_ORDER " ORDER BY host DESC"
-#define LOAD_MYSQL_USERS_WITH_DB_QUERY "SELECT user.user AS user,user.host AS host,user.password AS password,concat(user.user,user.host,user.password,user.Select_priv,IFNULL(db,'')) AS userdata, user.Select_priv AS anydb,db.db AS db FROM mysql.user LEFT JOIN mysql.db ON user.user=db.user AND user.host=db.host WHERE user.user IS NOT NULL AND user.user <> ''" MYSQL_USERS_WITH_DB_ORDER
+#define LOAD_MYSQL_USERS_WITH_DB_QUERY "SELECT \
+    user.user AS user, \
+    user.host AS host, \
+    user.password AS password, \
+    concat(user.user,user.host,user.password,user.Select_priv,IFNULL(db,'')) AS userdata, \
+    user.Select_priv AS anydb, \
+    db.db AS db \
+    FROM mysql.user LEFT JOIN mysql.db \
+    ON user.user=db.user AND user.host=db.host \
+    WHERE user.user IS NOT NULL" MYSQL_USERS_WITH_DB_ORDER
 
 #define MYSQL_USERS_WITH_DB_COUNT "SELECT COUNT(1) AS nusers_db FROM (" LOAD_MYSQL_USERS_WITH_DB_QUERY ") AS tbl_count"
 
-#define LOAD_MYSQL_USERS_WITH_DB_QUERY_NO_ROOT "SELECT * FROM (" LOAD_MYSQL_USERS_WITH_DB_QUERY ") AS t1 WHERE user NOT IN ('root')" MYSQL_USERS_WITH_DB_ORDER
+#define LOAD_MYSQL_USERS_WITH_DB_QUERY_NO_ROOT "SELECT * \
+    FROM (" LOAD_MYSQL_USERS_WITH_DB_QUERY ") AS t1 \
+    WHERE user NOT IN ('root')" MYSQL_USERS_WITH_DB_ORDER
 
-#define LOAD_MYSQL_DATABASE_NAMES "SELECT * FROM ( (SELECT COUNT(1) AS ndbs FROM INFORMATION_SCHEMA.SCHEMATA) AS tbl1, (SELECT GRANTEE,PRIVILEGE_TYPE from INFORMATION_SCHEMA.USER_PRIVILEGES WHERE privilege_type='SHOW DATABASES' AND REPLACE(GRANTEE, \'\\'\',\'\')=CURRENT_USER()) AS tbl2)"
+#define LOAD_MYSQL_DATABASE_NAMES "SELECT * \
+    FROM ( (SELECT COUNT(1) AS ndbs \
+    FROM INFORMATION_SCHEMA.SCHEMATA) AS tbl1, \
+    (SELECT GRANTEE,PRIVILEGE_TYPE from INFORMATION_SCHEMA.USER_PRIVILEGES \
+    WHERE privilege_type='SHOW DATABASES' AND REPLACE(GRANTEE, \'\\'\',\'\')=CURRENT_USER()) AS tbl2)"
 
+#define ERROR_NO_SHOW_DATABASES "%s: Unable to load database grant information, \
+    MaxScale authentication will proceed without including database permissions. \
+    To correct this GRANT SHOW DATABASES ON *.* privilege to the user %s."
 /** Defined in log_manager.cc */
 extern int            lm_enabled_logfiles_bitmask;
 extern size_t         log_ses_count[];
@@ -109,11 +125,38 @@ void *resource_fetch(HASHTABLE *, char *);
 int resource_add(HASHTABLE *, char *, char *);
 int resource_hash(char *);
 static int normalize_hostname(char *input_host, char *output_host);
-static int gw_mysql_set_timeouts(
-	MYSQL* handle,
-	int    read_timeout,
-	int    write_timeout,
-	int    connect_timeout);
+int wildcard_db_grant(char* str);
+
+int add_wildcard_users(USERS *users,
+		       char* name,
+		       char* host,
+		       char* password,
+		       char* anydb,
+		       char* db,
+		       HASHTABLE* hash);
+
+static int gw_mysql_set_timeouts(MYSQL* handle);
+
+/**
+ * Check if the IP address of the user matches the one in the grant. This assumes
+ * that the grant has one or more single-character wildcards in it.
+ * @param userhost User host address
+ * @param wildcardhost Host address in the grant
+ * @return True if the host address matches
+ */
+bool host_matches_singlechar_wildcard(const char* user, const char* wild)
+{
+    while (*user != '\0' && *wild != '\0')
+    {
+        if (*user != *wild && *wild != '_')
+        {
+            return false;
+        }
+        user++;
+        wild++;
+    }
+    return true;
+}
 
 /**
  * Load the user/passwd form mysql.user table into the service users' hashtable
@@ -198,7 +241,7 @@ HASHTABLE	*oldresources;
 	oldusers = service->users;
 
 	/* digest compare */
-	if (memcmp(oldusers->cksum, newusers->cksum, SHA_DIGEST_LENGTH) == 0) {
+	if (oldusers != NULL && memcmp(oldusers->cksum, newusers->cksum, SHA_DIGEST_LENGTH) == 0) {
 		/* same data, nothing to do */
 		LOGIF(LD, (skygw_log_write_flush(
 			LOGFILE_DEBUG,
@@ -222,7 +265,7 @@ HASHTABLE	*oldresources;
 
 	spinlock_release(&service->spin);
 
-	if (i) {
+	if (i && oldusers) {
 		/* free the old table */
 		users_free(oldusers);
 	}
@@ -230,6 +273,53 @@ HASHTABLE	*oldresources;
 	return i;
 }
 
+/**
+ * Check if the IP address is a valid MySQL IP address. The IP address can contain
+ * single or multi-character wildcards as used by MySQL.
+ * @param host IP address to check
+ * @return True if the address is a valid, MySQL type IP address
+ */
+bool is_ipaddress(const char* host)
+{
+    while (*host != '\0')
+    {
+        if (!isdigit(*host) && *host != '.' && *host != '_' && *host != '%')
+        {
+            return false;
+        }
+        host++;
+    }
+    return true;
+}
+
+/**
+ * Check if an IP address has single-character wildcards. A single-character
+ * wildcard is represented by an underscore in the MySQL hostnames.
+ * @param host Hostname to check
+ * @return True if the hostname is a valid IP address with a single character wildcard
+ */
+bool host_has_singlechar_wildcard(const char *host)
+{
+    const char* chrptr = host;
+    bool retval = false;
+
+    while (*chrptr != '\0')
+    {
+        if (!isdigit(*chrptr) && *chrptr != '.')
+        {
+            if (*chrptr == '_')
+            {
+                retval = true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        chrptr++;
+    }
+    return retval;
+}
 
 /**
  * Add a new MySQL user with host, password and netmask into the service users table
@@ -242,7 +332,7 @@ HASHTABLE	*oldresources;
  * @param user          The user name
  * @param host          The host to add, with possible wildcards
  * @param passwd	The sha1(sha1(passoword)) to add
- * @return              1 on success, 0 on failure
+ * @return              1 on success, 0 on failure and -1 on duplicate user
  */
 
 int add_mysql_users_with_host_ipv4(USERS *users, char *user, char *host, char *passwd, char *anydb, char *db) {
@@ -286,6 +376,12 @@ int add_mysql_users_with_host_ipv4(USERS *users, char *user, char *host, char *p
 	if (strcmp(host, "%") == 0) {
 		strcpy(ret_ip, "0.0.0.0");
 		key.netmask = 0;
+    } else if (strnlen(host, MYSQL_HOST_MAXLEN + 1) <= MYSQL_HOST_MAXLEN &&
+               is_ipaddress(host) &&
+               host_has_singlechar_wildcard(host)) {
+        strcpy(key.hostname, host);
+        strcpy(ret_ip, "0.0.0.0");
+		key.netmask = 0;
 	} else {
 		/* hostname without % wildcards has netmask = 32 */
 		key.netmask = normalize_hostname(host, ret_ip);
@@ -314,6 +410,10 @@ int add_mysql_users_with_host_ipv4(USERS *users, char *user, char *host, char *p
 		/* add user@host as key and passwd as value in the MySQL users hash table */
 		if (mysql_users_add(users, &key, passwd)) {
 			ret = 1;
+		}
+		else if(key.user)
+		{
+		    ret = -1;
 		}
 	}
 
@@ -380,11 +480,8 @@ addDatabases(SERVICE *service, MYSQL *con)
 
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
-				"%s: Unable to load database grant information, MaxScale "
-				"authentication will proceed without including database "
-				"permissions. To correct this GRANT select permission "
-				"on mysql.db to the user %s.",
-					service->name, service_user)));
+            ERROR_NO_SHOW_DATABASES,
+            service->name, service_user)));
 	}
 
 	/* free resut set */
@@ -421,8 +518,10 @@ addDatabases(SERVICE *service, MYSQL *con)
 
 	/* insert key and value "" */
 	while ((row = mysql_fetch_row(result))) {
-	    skygw_log_write(LOGFILE_DEBUG,"%s: Adding database %s to the resouce hash.",service->name,row[0]);
-	    resource_add(service->resources, row[0], "");
+	    if(resource_add(service->resources, row[0], ""))
+	    {
+		skygw_log_write(LOGFILE_DEBUG,"%s: Adding database %s to the resouce hash.",service->name,row[0]);
+	    }
 	}
 
 	mysql_free_result(result);
@@ -458,7 +557,7 @@ getDatabases(SERVICE *service, MYSQL *con)
 		LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Loading database names for service %s encountered "
-                        "error: %s.",
+                        "error when querying database privileges: %s.",
                         service->name,
                         mysql_error(con))));
 		return -1;
@@ -470,7 +569,7 @@ getDatabases(SERVICE *service, MYSQL *con)
 		LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Loading database names for service %s encountered "
-                        "error: %s.",
+                        "error when storing result set of database privilege query: %s.",
                         service->name,
                         mysql_error(con))));
 		return -1;
@@ -486,11 +585,8 @@ getDatabases(SERVICE *service, MYSQL *con)
 
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
-				"%s: Unable to load database grant information, MaxScale "
-				"authentication will proceed without including database "
-				"permissions. To correct this GRANT select permission "
-				"on mysql.db to the user %s.",
-					service->name, service_user)));
+            ERROR_NO_SHOW_DATABASES,
+            service->name, service_user)));
 	}
 
 	/* free resut set */
@@ -505,7 +601,7 @@ getDatabases(SERVICE *service, MYSQL *con)
 		LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Loading database names for service %s encountered "
-                        "error: %s.",
+                        "error when executing SHOW DATABASES query: %s.",
                         service->name,
                         mysql_error(con))));
 
@@ -518,7 +614,7 @@ getDatabases(SERVICE *service, MYSQL *con)
 		LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error : Loading database names for service %s encountered "
-                        "error: %s.",
+                        "error when storing the result set: %s.",
                         service->name,
                         mysql_error(con))));
 
@@ -572,7 +668,8 @@ getAllUsers(SERVICE *service, USERS *users)
 						MYSQL_DATABASE_MAXLEN;
 	int		dbnames = 0;
 	int		db_grants = 0;
-	
+	bool anon_user = false;
+
 	if (serviceGetUser(service, &service_user, &service_passwd) == 0)
 	{
 		ss_dassert(service_passwd == NULL || service_user == NULL);
@@ -602,6 +699,75 @@ getAllUsers(SERVICE *service, USERS *users)
 
 	service->resources = resource_alloc();
 
+	 while(server != NULL)
+        {
+
+            con = mysql_init(NULL);
+
+            if (con == NULL)
+            {
+		LOGIF(LE, (skygw_log_write_flush(
+                        LOGFILE_ERROR,
+                                                 "Error : mysql_init: %s",
+                                                 mysql_error(con))));
+		goto cleanup;
+            }
+
+            /** Set read, write and connect timeout values */
+            if (gw_mysql_set_timeouts(con))
+            {
+		LOGIF(LE, (skygw_log_write_flush(
+			LOGFILE_ERROR,
+                                                 "Error : failed to set timeout values for backend "
+			"connection.")));
+		mysql_close(con);
+		goto cleanup;
+            }
+
+            if (mysql_options(con, MYSQL_OPT_USE_REMOTE_CONNECTION, NULL))
+            {
+		LOGIF(LE, (skygw_log_write_flush(
+                        LOGFILE_ERROR,
+                                                 "Error : failed to set external connection. "
+                        "It is needed for backend server connections.")));
+		mysql_close(con);
+		goto cleanup;
+            }
+
+
+            while(!service->svc_do_shutdown &&
+                  server != NULL &&
+                  (mysql_real_connect(con,
+                                      server->server->name,
+                                      service_user,
+                                      dpwd,
+                                      NULL,
+                                      server->server->port,
+                                      NULL,
+                                      0) == NULL))
+            {
+                server = server->next;
+            }
+
+
+            if (server == NULL)
+            {
+		LOGIF(LE, (skygw_log_write_flush(
+			LOGFILE_ERROR,
+                                                 "Error : Unable to get user data from backend database "
+			"for service [%s]. Missing server information.",
+                                                 service->name)));
+		mysql_close(con);
+		goto cleanup;
+            }
+
+	    addDatabases(service, con);
+	    mysql_close(con);
+	    server = server->next;
+	 }
+
+	server = service->dbref;
+
         while(server != NULL)
         {
             
@@ -617,10 +783,7 @@ getAllUsers(SERVICE *service, USERS *users)
             }
             
             /** Set read, write and connect timeout values */
-            if (gw_mysql_set_timeouts(con, 
-                                      DEFAULT_READ_TIMEOUT, 
-                                      DEFAULT_WRITE_TIMEOUT,
-                                      DEFAULT_CONNECT_TIMEOUT))
+            if (gw_mysql_set_timeouts(con))
             {
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
@@ -762,11 +925,8 @@ getAllUsers(SERVICE *service, USERS *users)
                     
                     LOGIF(LE, (skygw_log_write_flush(
                             LOGFILE_ERROR,
-                                                     "%s: Unable to load database grant information, MaxScale "
-                            "authentication will proceed without including database "
-                            "permissions. To correct this GRANT select permission "
-                            "on msql.db to the user %s.",
-                                                     service->name, service_user)));
+                            ERROR_NO_SHOW_DATABASES,
+                            service->name, service_user)));
                     
                     /* check for root user select */
                     if(service->enable_root) {
@@ -825,31 +985,19 @@ getAllUsers(SERVICE *service, USERS *users)
             users_data = (char *)calloc(nusers, (users_data_row_len * sizeof(char)) + 1);
             
             if (users_data == NULL) {
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
-                                                 "Error : Memory allocation for user data failed due to "
+                        "Error : Memory allocation for user data failed due to "
 			"%d, %s.",
-                                                 errno,
-                                                 strerror(errno))));
+                        errno,
+                        strerror_r(errno, errbuf, sizeof(errbuf)))));
 		mysql_free_result(result);
 		mysql_close(con);
                 
 		goto cleanup;
             }
-            
-            if (db_grants) {
-		/* load all mysql database names */
-		dbnames = addDatabases(service, con);
-                
-		LOGIF(LD, (skygw_log_write(
-			LOGFILE_DEBUG,
-                                         "Loaded %d MySQL Database Names for service [%s]",
-                                         dbnames,
-                                         service->name)));
-            } else {
-		service->resources = NULL;
-            }
-            
+
             while ((row = mysql_fetch_row(result))) {
                 
 		/**
@@ -860,7 +1008,16 @@ getAllUsers(SERVICE *service, USERS *users)
 		
 		int rc = 0;
 		char *password = NULL;
-                
+
+                /** If the username is empty, the backend server still has anonymous
+                 * user in it. This will mean that localhost addresses do not match
+                 * the wildcard host '%' */
+                if(strlen(row[0]) == 0)
+                {
+                    anon_user = true;
+                    continue;
+                }
+
 		if (row[2] != NULL) {
                     /* detect mysql_old_password (pre 4.1 protocol) */
                     if (strlen(row[2]) == 16) {
@@ -886,9 +1043,9 @@ getAllUsers(SERVICE *service, USERS *users)
 		/* 
                  * add user@host and DB global priv and specificsa grant (if possible)
                  */
-                
+                bool havedb = false;
+
 		if (db_grants) {
-		    bool havedb = false;
                     /* we have dbgrants, store them */
 		    if(row[5]){
 			unsigned long *rowlen = mysql_fetch_lengths(result);
@@ -905,10 +1062,20 @@ getAllUsers(SERVICE *service, USERS *users)
 						     dbnm)));
 			}
 		    }
-                    rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, row[4],havedb ? dbnm : NULL);
-		    skygw_log_write(LOGFILE_DEBUG,"%s: Adding user:%s host:%s anydb:%s db:%s.",
+
+		    if(havedb && wildcard_db_grant(dbnm) && service->optimize_wildcard)
+		    {
+			rc = add_wildcard_users(users, row[0], row[1], password, row[4], dbnm, service->resources);
+			skygw_log_write(LOGFILE_DEBUG|LOGFILE_TRACE,"%s: Converted '%s' to %d individual database grants.",service->name,dbnm,rc);
+		    }
+		    else
+		    {
+			rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, row[4], havedb ? dbnm : NULL);
+		    }
+		    
+		    LOGIF(LD,(skygw_log_write(LOGFILE_DEBUG,"%s: Adding user:%s host:%s anydb:%s db:%s.",
 			     service->name,row[0],row[1],row[4],
-			     havedb ? dbnm : NULL);
+			     havedb ? dbnm : NULL)));
 		} else {
                     /* we don't have dbgrants, simply set ANY DB for the user */	
                     rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, "Y", NULL);
@@ -931,7 +1098,7 @@ getAllUsers(SERVICE *service, USERS *users)
                         
                         /* Log the user being added with its db grants */
                         LOGIF(LD, (skygw_log_write_flush(
-                                LOGFILE_DEBUG,
+                                LOGFILE_DEBUG|LOGFILE_TRACE,
                                                          "%s: User %s@%s for database %s added to "
                                 "service user table.",
                                                          service->name,
@@ -941,7 +1108,7 @@ getAllUsers(SERVICE *service, USERS *users)
                     } else {
                         /* Log the user being added (without db grants) */
                         LOGIF(LD, (skygw_log_write_flush(
-                                LOGFILE_DEBUG,
+                                LOGFILE_DEBUG|LOGFILE_TRACE,
                                                          "%s: User %s@%s added to service user table.",
                                                          service->name,
                                                          row[0],
@@ -952,9 +1119,17 @@ getAllUsers(SERVICE *service, USERS *users)
                     strncat(users_data, row[3], users_data_row_len);
                     
                     total_users++;
+
+		} else if(rc == -1) {
+		    /** Duplicate user*/
+		    LOGIF(LT,(skygw_log_write(LT,
+					     "Duplicate MySQL user found for service [%s]: %s@%s%s%s",
+					     service->name,
+					     row[0],row[1],havedb?" for database: ":"",
+					     havedb ?dbnm:"")));
 		} else {
                     LOGIF(LE, (skygw_log_write_flush(
-                            LOGFILE_ERROR,
+                            LOGFILE_ERROR|LOGFILE_TRACE,
                                                      "Warning: Failed to add user %s@%s for service [%s]. "
                             "This user will be unavailable via MaxScale.",
                                                      row[0],
@@ -991,7 +1166,10 @@ getAllUsers(SERVICE *service, USERS *users)
         SHA1((const unsigned char *) final_data, strlen(final_data), hash);
 
 	memcpy(users->cksum, hash, SHA_DIGEST_LENGTH);
-        
+
+        /** Set the parameter if it is not configured by the user */
+        if(service->localhost_match_wildcard_host == SERVICE_PARAM_UNINIT)
+            service->localhost_match_wildcard_host = anon_user ? 0 : 1;
         cleanup:
         
         free(dpwd);
@@ -1032,6 +1210,8 @@ getUsers(SERVICE *service, USERS *users)
 						MYSQL_DATABASE_MAXLEN;
 	int		dbnames = 0;
 	int		db_grants = 0;
+	char		dbnm[MYSQL_DATABASE_MAXLEN+1];
+        bool anon_user = false;
 	
 	if (serviceGetUser(service, &service_user, &service_passwd) == 0)
 	{
@@ -1054,10 +1234,7 @@ getUsers(SERVICE *service, USERS *users)
 		return -1;
 	}
 	/** Set read, write and connect timeout values */
-	if (gw_mysql_set_timeouts(con, 
-		DEFAULT_READ_TIMEOUT, 
-		DEFAULT_WRITE_TIMEOUT,
-		DEFAULT_CONNECT_TIMEOUT))
+	if (gw_mysql_set_timeouts(con))
 	{
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
@@ -1126,6 +1303,16 @@ getUsers(SERVICE *service, USERS *users)
 					NULL,
 					0) == NULL))
 		{
+			LOGIF(LE, (skygw_log_write_flush(
+				LOGFILE_ERROR,
+				"Error : failure loading users data from backend "
+				"[%s:%i] for service [%s]. MySQL error %i, %s",
+				server->server->name,
+				server->server->port,
+				service->name,
+				mysql_errno(con),
+				mysql_error(con))));
+
 			server = server->next;
 		}
 		
@@ -1154,7 +1341,7 @@ getUsers(SERVICE *service, USERS *users)
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
 			"Error : Unable to get user data from backend database "
-			"for service [%s]. Missing server information.",
+			"for service [%s]. Failed to connect to any of the backend databases.",
 			service->name)));
 		mysql_close(con);
 		return -1;
@@ -1255,11 +1442,8 @@ getUsers(SERVICE *service, USERS *users)
 
 			LOGIF(LE, (skygw_log_write_flush(
 				LOGFILE_ERROR,
-				"%s: Unable to load database grant information, MaxScale "
-				"authentication will proceed without including database "
-				"permissions. To correct this GRANT select permission "
-				"on msql.db to the user %s.",
-					service->name, service_user)));
+                ERROR_NO_SHOW_DATABASES,
+                service->name, service_user)));
 			
 			/* check for root user select */
 			if(service->enable_root) {
@@ -1318,12 +1502,13 @@ getUsers(SERVICE *service, USERS *users)
 	users_data = (char *)calloc(nusers, (users_data_row_len * sizeof(char)) + 1);
 
 	if (users_data == NULL) {
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
 			"Error : Memory allocation for user data failed due to "
 			"%d, %s.",
 			errno,
-			strerror(errno))));
+			strerror_r(errno, errbuf, sizeof(errbuf)))));
 		mysql_free_result(result);
 		mysql_close(con);
 
@@ -1354,6 +1539,15 @@ getUsers(SERVICE *service, USERS *users)
 		int rc = 0;
 		char *password = NULL;
 
+                /** If the username is empty, the backend server still has anonymous
+                 * user in it. This will mean that localhost addresses do not match
+                 * the wildcard host '%' */
+                if(strlen(row[0]) == 0)
+                {
+                    anon_user = true;
+                    continue;
+                }
+
 		if (row[2] != NULL) {
 			/* detect mysql_old_password (pre 4.1 protocol) */
 			if (strlen(row[2]) == 16) {
@@ -1381,8 +1575,42 @@ getUsers(SERVICE *service, USERS *users)
 		 */
 
 		if (db_grants) {
-			/* we have dbgrants, store them */
-			rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, row[4], row[5]);
+		    bool havedb = false;
+		    /* we have dbgrants, store them */
+		    if(row[5]){
+			unsigned long *rowlen = mysql_fetch_lengths(result);
+			memcpy(dbnm,row[5],rowlen[5]);
+			memset(dbnm + rowlen[5],0,1);
+			havedb = true;
+			if(service->strip_db_esc) {
+			    strip_escape_chars(dbnm);
+			    LOGIF(LD, (skygw_log_write(
+				    LOGFILE_DEBUG,
+						     "[%s]: %s -> %s",
+						     service->name,
+						     row[5],
+						     dbnm)));
+			}
+		    }
+
+		    if(havedb && wildcard_db_grant(row[5]))
+		    {
+			if(service->optimize_wildcard)
+			{
+			    rc = add_wildcard_users(users, row[0], row[1], password, row[4], dbnm, service->resources);
+			    skygw_log_write(LOGFILE_DEBUG|LOGFILE_TRACE,"%s: Converted '%s' to %d individual database grants.",service->name,row[5],rc);
+			}
+			else
+			{
+			    /** Use ANYDB for wildcard grants */
+			    rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, "Y", NULL);
+			}
+		    }
+		    else
+		    {
+			rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, row[4], havedb ? dbnm : NULL);
+		    }
+
 		} else {
 			/* we don't have dbgrants, simply set ANY DB for the user */	
 			rc = add_mysql_users_with_host_ipv4(users, row[0], row[1], password, "Y", NULL);
@@ -1405,7 +1633,7 @@ getUsers(SERVICE *service, USERS *users)
 
 				/* Log the user being added with its db grants */
 				LOGIF(LD, (skygw_log_write_flush(
-						LOGFILE_DEBUG,
+						LOGFILE_DEBUG|LOGFILE_TRACE,
 						"%s: User %s@%s for database %s added to "
 						"service user table.",
 						service->name,
@@ -1415,7 +1643,7 @@ getUsers(SERVICE *service, USERS *users)
 			} else {
 				/* Log the user being added (without db grants) */
 				LOGIF(LD, (skygw_log_write_flush(
-					LOGFILE_DEBUG,
+					LOGFILE_DEBUG|LOGFILE_TRACE,
 						"%s: User %s@%s added to service user table.",
 						service->name,
 						row[0],
@@ -1426,9 +1654,17 @@ getUsers(SERVICE *service, USERS *users)
 			strncat(users_data, row[3], users_data_row_len);
 
 			total_users++;
+
+		} else if(rc == -1) {
+		    /** Duplicate user*/
+		    LOGIF(LE,(skygw_log_write(LT|LE,
+					     "Warning: Duplicate MySQL user found for service [%s]: %s@%s%s%s",
+					     service->name,
+					     row[0],row[1],db_grants?" for database: ":"",
+					     db_grants ?row[5]:"")));
 		} else {
 			LOGIF(LE, (skygw_log_write_flush(
-				LOGFILE_ERROR,
+				LOGFILE_ERROR|LOGFILE_TRACE,
 				"Warning: Failed to add user %s@%s for service [%s]. "
 				"This user will be unavailable via MaxScale.",
 				row[0],
@@ -1441,6 +1677,10 @@ getUsers(SERVICE *service, USERS *users)
         SHA1((const unsigned char *) users_data, strlen(users_data), hash);
 
 	memcpy(users->cksum, hash, SHA_DIGEST_LENGTH);
+
+        /** Set the parameter if it is not configured by the user */
+        if(service->localhost_match_wildcard_host == SERVICE_PARAM_UNINIT)
+            service->localhost_match_wildcard_host = anon_user ? 0 : 1;
 
 	free(users_data);
 	mysql_free_result(result);
@@ -1553,7 +1793,17 @@ static int uh_cmpfun( void* v1, void* v2) {
 	if (hu1->user == NULL || hu2->user == NULL)
 		return 0;
 
-	if (strcmp(hu1->user, hu2->user) == 0 && (hu1->ipv4.sin_addr.s_addr == hu2->ipv4.sin_addr.s_addr) && (hu1->netmask >= hu2->netmask)) {
+    /** If the stored user has the unmodified address stored, that means we were not able
+     * to resolve it at the time we loaded the users. We need to check if the
+     * address contains wildcards and if the user's address matches that. */
+
+    const bool wildcard_host = strlen(hu2->hostname) > 0 && strlen(hu1->hostname) > 0;
+
+	if ((strcmp(hu1->user, hu2->user) == 0) &&
+     /** Check for wildcard hostnames */
+     ((wildcard_host && host_matches_singlechar_wildcard(hu1->hostname, hu2->hostname)) ||
+      /** If no wildcard hostname is stored, check for network address. */
+      (!wildcard_host && (hu1->ipv4.sin_addr.s_addr == hu2->ipv4.sin_addr.s_addr) && (hu1->netmask >= hu2->netmask)))) {
 
 		/* if no database name was passed, auth is ok */
 		if (hu1->resource == NULL || (hu1->resource && !strlen(hu1->resource))) {
@@ -1570,6 +1820,41 @@ static int uh_cmpfun( void* v1, void* v2) {
 			/* (3) check for database name specific grant and allow auth */
 			if (hu1->resource && hu2->resource && strcmp(hu1->resource,hu2->resource) == 0) {
 				return 0;
+			}
+
+			if(hu2->resource && strlen(hu2->resource) && strchr(hu2->resource,'%') != NULL)
+			{
+			  regex_t re;
+			  char db[MYSQL_DATABASE_MAXLEN*2 +1];
+			  strcpy(db,hu2->resource);
+			  int len = strlen(db);
+			  char* ptr = strrchr(db,'%');
+
+			  if(ptr == NULL)
+			  {
+			    return 1;
+			  }
+
+			  while(ptr)
+			  {
+			    memmove(ptr+1,ptr,(len - (ptr - db)) + 1);
+			    *ptr = '.';
+			    *(ptr + 1) = '*';
+			    len = strlen(db);
+			    ptr = strrchr(db,'%');
+			  }
+
+			  if((regcomp(&re,db,REG_ICASE|REG_NOSUB)))
+			  {
+			    return 1;
+			  }
+
+			  if(regexec(&re,hu1->resource,0,NULL,0) == 0)
+			  {
+			    regfree(&re);
+			    return 0;
+			  }
+			  regfree(&re);
 			}
 
 			/* no matches, deny auth */
@@ -1604,6 +1889,10 @@ static void *uh_keydup(void* key) {
 		free(rval);
 		return NULL;
 	}
+
+    ss_dassert(strnlen(rval->hostname, MYSQL_HOST_MAXLEN + 1) <= MYSQL_HOST_MAXLEN);
+    strncpy(rval->hostname, current_key->hostname, MYSQL_HOST_MAXLEN);
+    rval->hostname[MYSQL_HOST_MAXLEN] = '\0';
 
 	memcpy(&rval->ipv4, &current_key->ipv4, sizeof(struct sockaddr_in));
 	memcpy(&rval->netmask, &current_key->netmask, sizeof(int));
@@ -1681,18 +1970,6 @@ char *mysql_format_user_entry(void *data)
         return mysql_user;
 }
 
-/*
- * The hash function we use for storing MySQL database names.
- *
- * @param key	The key value
- * @return	The hash key
- */
-int
-resource_hash(char *key)
-{
-        return (*key + *(key + 1));
-}
-
 /**
  * Remove the resources table
  *
@@ -1716,7 +1993,7 @@ resource_alloc()
 {
 HASHTABLE       *resources;
 
-        if ((resources = hashtable_alloc(10, resource_hash, strcmp)) == NULL)
+        if ((resources = hashtable_alloc(10, simple_str_hash, strcmp)) == NULL)
         {
                 return NULL;
         }
@@ -1848,17 +2125,15 @@ int	useorig = 0;
  * 
  * @return 0 if succeed, 1 if failed
  */
-static int gw_mysql_set_timeouts(
-	MYSQL* handle,
-	int    read_timeout,
-	int    write_timeout,
-	int    connect_timeout)
+static int gw_mysql_set_timeouts(MYSQL* handle)
 {	
 	int rc;
 	
+    GATEWAY_CONF* cnf = config_get_global_options();
+
 	if ((rc = mysql_options(handle, 
 		MYSQL_OPT_READ_TIMEOUT, 
-		(void *)&read_timeout)))
+		(void *)&cnf->auth_read_timeout)))
 	{
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
@@ -1869,7 +2144,7 @@ static int gw_mysql_set_timeouts(
 	
 	if ((rc = mysql_options(handle, 
 			MYSQL_OPT_CONNECT_TIMEOUT, 
-			(void *)&connect_timeout)))
+			(void *)&cnf->auth_conn_timeout)))
 	{
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
@@ -1880,7 +2155,7 @@ static int gw_mysql_set_timeouts(
 	
 	if ((rc = mysql_options(handle, 
 			MYSQL_OPT_WRITE_TIMEOUT, 
-			(void *)&write_timeout)))
+			(void *)&cnf->auth_write_timeout)))
 	{
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
@@ -2016,6 +2291,7 @@ int			tmp;
 			free(dbkey);
 			return NULL;
 		}
+		dbkey->resource[tmp] = 0;	// NULL Terminate
 	}
 	else		// NULL is valid, so represent with a length of -1
 	{
@@ -2073,4 +2349,225 @@ int
 dbusers_load(USERS *users, char *filename)
 {
 	return hashtable_load(users->data, filename, dbusers_keyread, dbusers_valueread);
+}
+
+/**
+ * Check if the database name contains a wildcard character
+ * @param str Database grant
+ * @return 1 if the name contains the '%' wildcard character, 0 if it does not
+ */
+int wildcard_db_grant(char* str)
+{
+    char* ptr = str;
+
+    while(ptr && *ptr != '\0')
+    {
+	if(*ptr == '%')
+	    return 1;
+	ptr++;
+    }
+
+    return 0;
+}
+
+/**
+ *
+ * @param users Pointer to USERS struct
+ * @param name Username of the client
+ * @param host Host address of the client
+ * @param password Client password
+ * @param anydb If the user has access to all databases
+ * @param db Database, in wildcard form
+ * @param hash Hashtable with all database names
+ * @return number of unique grants generated from wildcard database name
+ */
+int add_wildcard_users(USERS *users, char* name, char* host, char* password, char* anydb, char* db, HASHTABLE* hash)
+{
+    HASHITERATOR* iter;
+    HASHTABLE* ht = hash;
+    char *restr,*ptr,*value;
+    int len,err,rval = 0;
+    char errbuf[1024];
+    regex_t re;
+
+    if(db == NULL || hash == NULL)
+	return 0;
+
+    if((restr = malloc(sizeof(char)*strlen(db)*2)) == NULL)
+	return 0;
+    
+    strcpy(restr,db);
+
+    len = strlen(restr);
+    ptr = strchr(restr,'%');
+
+    if(ptr == NULL)
+    {
+	free(restr);
+	return 0;
+    }
+
+    while(ptr)
+    {
+	memmove(ptr+1,ptr,(len - (ptr - restr)) + 1);
+	*ptr++ = '.';
+	*ptr = '*';
+	len = strlen(restr);
+	ptr = strchr(restr,'%');
+    }
+
+    if((err = regcomp(&re,restr,REG_ICASE|REG_NOSUB)))
+    {
+	regerror(err,&re,errbuf,1024);
+	skygw_log_write(LOGFILE_ERROR,"Error: Failed to compile regex "
+		"when resolving wildcard database grants: %s",
+		 errbuf);
+	free(restr);
+	return 0;
+    }
+
+    iter = hashtable_iterator(ht);
+
+    while(iter && (value = hashtable_next(iter)))
+    {
+	if(regexec(&re,value,0,NULL,0) == 0)
+	{
+	    rval += add_mysql_users_with_host_ipv4(users, name, host, password, anydb, value);
+	}
+    }
+    
+    hashtable_iterator_free(iter);
+    regfree(&re);
+    free(restr);
+
+    return rval;
+}
+
+/**
+ * Check if the service user has all required permissions to operate properly.
+ * this checks for SELECT permissions on mysql.user and mysql.db tables and for
+ * SHOW DATABASES permissions. If permissions are not adequate, an error message
+ * is logged.
+ * @param service Service to inspect
+ * @return True if service permissions are correct. False if one or more permissions
+ * are missing or if an error occurred.
+ */
+bool check_service_permissions(SERVICE* service)
+{
+    MYSQL* mysql;
+    MYSQL_RES* res;
+    char *user,*password,*dpasswd;
+    SERVER_REF* server;
+    int conn_timeout = 1;
+    bool rval = true;
+
+    if(isInternalService(service->routerModule))
+	return true;
+
+    if(service->dbref == NULL)
+    {
+	skygw_log_write(LE,"%s: Error: Service is missing the servers parameter.",service->name);
+	return false;
+    }
+
+    server = service->dbref;
+
+    if (serviceGetUser(service, &user, &password) == 0)
+    {
+	skygw_log_write(LE,
+                 "%s: Error: Service is missing the user credentials for authentication.",
+		 service->name);
+	return false;
+    }
+
+    dpasswd = decryptPassword(password);
+
+    if((mysql = mysql_init(NULL)) == NULL)
+    {
+	skygw_log_write(LE,"[%s] Error: MySQL connection initialization failed.",__FUNCTION__);
+	free(dpasswd);
+	return false;
+    }
+
+    mysql_options(mysql,MYSQL_OPT_USE_REMOTE_CONNECTION,NULL);
+    mysql_options(mysql,MYSQL_OPT_CONNECT_TIMEOUT,&conn_timeout);
+    /** Connect to the first server. This assumes all servers have identical
+     * user permissions. */
+
+    if(mysql_real_connect(mysql,server->server->name,user,dpasswd,NULL,server->server->port,NULL,0) == NULL)
+    {
+        int my_errno = mysql_errno(mysql);
+
+	skygw_log_write(LE,"%s: Error: Failed to connect to server %s(%s:%d) when"
+		" checking authentication user credentials and permissions: %d %s",
+		 service->name,
+		 server->server->unique_name,
+		 server->server->name,
+		 server->server->port,
+                 my_errno,
+                 mysql_error(mysql));
+	mysql_close(mysql);
+	free(dpasswd);
+
+        /** We don't know enough about user permissions */
+        return my_errno != ER_ACCESS_DENIED_ERROR;
+    }
+
+    if(mysql_query(mysql,"SELECT user, host, password,Select_priv FROM mysql.user limit 1") != 0)
+    {
+        if(mysql_errno(mysql) == ER_TABLEACCESS_DENIED_ERROR)
+        {
+            skygw_log_write(LE,"%s: Error: User '%s' is missing SELECT privileges"
+                    " on mysql.user table. MySQL error message: %s",
+                            service->name,user,mysql_error(mysql));
+             rval = false;
+        }
+        else
+        {
+            skygw_log_write(LE,"%s: Error: Failed to query from mysql.user table."
+                    " MySQL error message: %s",
+                            service->name,mysql_error(mysql));
+	}
+    }
+    else
+    {
+        if((res = mysql_use_result(mysql)) == NULL)
+        {
+            skygw_log_write(LE,"%s: Error: Result retrieval failed when checking for"
+                    " permissions to the mysql.user table: %s",
+                            service->name,mysql_error(mysql));
+            mysql_close(mysql);
+            free(dpasswd);
+            return true;
+        }
+        mysql_free_result(res);
+    }
+    if(mysql_query(mysql,"SELECT user, host, db FROM mysql.db limit 1") != 0)
+    {
+        if(mysql_errno(mysql) == ER_TABLEACCESS_DENIED_ERROR)
+        {
+            skygw_log_write(LE,"%s: Warning: User '%s' is missing SELECT privileges on mysql.db table. Database name will be ignored in authentication. MySQL error message: %s",
+                            service->name,user,mysql_error(mysql));
+        }
+        else
+        {
+            skygw_log_write(LE,"%s: Error: Failed to query from mysql.db table. MySQL error message: %s",
+                            service->name,mysql_error(mysql));
+	}
+    }
+    else
+    {
+        if((res = mysql_use_result(mysql)) == NULL)
+        {
+            skygw_log_write(LE,"%s: Error: Result retrieval failed when checking for permissions to the mysql.db table: %s",
+                            service->name,mysql_error(mysql));
+        }
+        else
+        {
+            mysql_free_result(res);
+        }
+    }
+    mysql_close(mysql);
+    free(dpasswd);
+    return rval;
 }

@@ -20,6 +20,7 @@
 #include <skygw_utils.h>
 #include <stdint.h>
 #include <openssl/sha.h>
+#include <spinlock.h>
 /**
  * @file config.h The configuration handling elements
  *
@@ -104,6 +105,11 @@ typedef struct {
 	unsigned long		id;					/**< MaxScale ID */
 	unsigned int		n_nbpoll;		/**< Tune number of non-blocking polls */
 	unsigned int		pollsleep;		/**< Wait time in blocking polls */
+        int syslog; /*< Log to syslog */
+        int maxlog; /*< Log to MaxScale's own logs */
+        unsigned int auth_conn_timeout; /*< Connection timeout for the user authentication */
+        unsigned int auth_read_timeout; /*< Read timeout for the user authentication */
+        unsigned int auth_write_timeout; /*<  Write timeout for the user authentication */
 } GATEWAY_CONF;
 
 extern int		config_load(char *);
@@ -115,6 +121,7 @@ CONFIG_PARAMETER*	config_get_param(CONFIG_PARAMETER* params, const char* name);
 config_param_type_t 	config_get_paramtype(CONFIG_PARAMETER* param);
 CONFIG_PARAMETER*	config_clone_param(CONFIG_PARAMETER* param);
 extern int		config_truth_value(char *);
+extern double           config_percentage_value(char *str);
 bool config_set_qualified_param(
         CONFIG_PARAMETER* param, 
         void* val, 
@@ -142,4 +149,7 @@ bool config_get_valtarget(
 void config_enable_feedback_task(void);
 void config_disable_feedback_task(void);
 unsigned long  config_get_gateway_id(void);
+GATEWAY_CONF* config_get_global_options();
+bool isInternalService(char *router);
+char* config_clean_string_list(char* str);
 #endif

@@ -6,36 +6,82 @@ endif()
 
 message(STATUS "CMake version: ${CMAKE_VERSION}")
 
-include(macros.cmake)
-
+include(${CMAKE_SOURCE_DIR}/cmake/macros.cmake)
 enable_testing()
+
+# Packaging builds install to /usr and other builds to /usr/local
+if(PACKAGE)
+  set(CMAKE_INSTALL_PREFIX "/usr" CACHE PATH "Prefix prepended to install directories.")
+endif()
+
+# Set default values for cache entries and set the MaxScale version
 set_variables() 
 set_maxscale_version()
 
-set(CMAKE_INSTALL_PREFIX "/usr/local/mariadb-maxscale" CACHE PATH "Prefix prepended to install directories.")
-
+set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Choose the type of build, options are: None(CMAKE_CXX_FLAGS or CMAKE_C_FLAGS used) Debug Release RelWithDebInfo MinSizeRel.")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 project(MaxScale)
 
-#Disabled for now pending evaluation
-#include(CheckPlatform.cmake) 
+# Set the installation layout
+include(${CMAKE_SOURCE_DIR}/cmake/install_layout.cmake)
+
+#Do the platform check
+include(cmake/CheckPlatform.cmake) 
 
 check_deps()
 check_dirs()
+find_package(OpenSSL)
 find_package(Valgrind)
 find_package(MySQLClient)
 find_package(MySQL)
 find_package(Pandoc)
+find_package(TCMalloc)
+find_package(Jemalloc)
+find_package(Git)
+find_package(CURL) 
+
+# Build PCRE2
+include(cmake/BuildPCRE2.cmake)
 
 # You can find the variables set by this in the FindCURL.cmake file
 # which is a default module in CMake.
-find_package(CURL) 
+
 if(NOT CURL_FOUND)
   message(FATAL_ERROR "Failed to locate dependency: libcurl")
 endif()
 
-set(CMAKE_INSTALL_RPATH ${CMAKE_INSTALL_RPATH}:${CMAKE_INSTALL_PREFIX}/lib:${CMAKE_INSTALL_PREFIX}/modules)
+if(NOT OPENSSL_FOUND)
+  message(FATAL_ERROR "Failed to locate dependency: OpenSSL")
+else()
+  if(OPENSSL_VERSION VERSION_LESS 1 AND NOT FORCE_OPENSSL100)
+    add_definitions("-DOPENSSL_0_9")
+  else()
+    add_definitions("-DOPENSSL_1_0")
+  endif()
+endif()
+
+if(GIT_FOUND)
+  message(STATUS "Found git ${GIT_VERSION_STRING}")
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --max-count=1 HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT
+    ERROR_VARIABLE GIT_ERROR
+    RESULT_VARIABLE GIT_RVAL)
+  if(${GIT_RVAL} EQUAL 0)
+    string(REPLACE "\n" "" MAXSCALE_COMMIT ${GIT_COMMIT})
+    message(STATUS "Commit ID: ${MAXSCALE_COMMIT}")
+  else()
+    message(STATUS "Git exited with non-zero value: ${GIT_ERROR}")
+    message(STATUS "Could not find repository in source folder, MaxScale commit ID will not be resolved. Will use 'source-build' for commit ID.")
+    set(MAXSCALE_COMMIT "source-build")
+  endif()
+else()
+  message(WARNING "Could not find git, MaxScale commit ID will not be resolved. Will use 'source-build' for commit ID.")
+  set(MAXSCALE_COMMIT "source-build")
+endif()
+
+set(CMAKE_INSTALL_RPATH ${CMAKE_INSTALL_RPATH}:${CMAKE_INSTALL_PREFIX}/${MAXSCALE_LIBDIR})
 
 # Make sure the release notes for this release are present if it is a stable one
 if(${MAXSCALE_VERSION} MATCHES "-stable")
@@ -47,42 +93,32 @@ if(${MAXSCALE_VERSION} MATCHES "-stable")
 endif()
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/server/include)
-configure_file(${CMAKE_SOURCE_DIR}/server/include/version.h.in ${CMAKE_BINARY_DIR}/server/include/version.h)
-configure_file(${CMAKE_SOURCE_DIR}/server/test/maxscale_test.h.in ${CMAKE_BINARY_DIR}/server/include/maxscale_test.h)
-configure_file(${CMAKE_SOURCE_DIR}/etc/postinst.in ${CMAKE_BINARY_DIR}/postinst)
-configure_file(${CMAKE_SOURCE_DIR}/etc/postrm.in ${CMAKE_BINARY_DIR}/postrm)
+configure_file(${CMAKE_SOURCE_DIR}/server/include/version.h.in ${CMAKE_BINARY_DIR}/server/include/version.h @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/server/include/gwdirs.h.in ${CMAKE_BINARY_DIR}/server/include/gwdirs.h @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/server/test/maxscale_test.h.in ${CMAKE_BINARY_DIR}/server/include/maxscale_test.h @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/etc/postinst.in ${CMAKE_BINARY_DIR}/postinst @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/etc/postrm.in ${CMAKE_BINARY_DIR}/postrm @ONLY)
+configure_file(${CMAKE_SOURCE_DIR}/server/test/maxscale_test.cnf ${CMAKE_BINARY_DIR}/maxscale.cnf @ONLY)
 
-set(CMAKE_C_FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -fPIC")
-set(CMAKE_CXX_FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -fPIC")
-set(DEBUG_FLAGS "-ggdb -pthread -pipe -Wformat -fstack-protector --param=ssp-buffer-size=4")
+set(FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -Werror -fPIC" CACHE STRING "Compilation flags")
+set(DEBUG_FLAGS "-ggdb -pthread -pipe -Wformat -fstack-protector --param=ssp-buffer-size=4" CACHE STRING "Debug compilation flags")
 
 if(CMAKE_VERSION VERSION_GREATER 2.6)
   if((CMAKE_C_COMPILER_ID STREQUAL "GNU") AND (NOT (CMAKE_C_COMPILER_VERSION VERSION_LESS 4.2)))
     message(STATUS "C Compiler supports: -Werror=format-security")
-    set(DEBUG_FLAGS "${DEBUG_FLAGS} -Werror=format-security")
+    set(DEBUG_FLAGS "${DEBUG_FLAGS} -Werror=format-security" CACHE STRING "Debug compilation flags")
   endif()
 
   if((CMAKE_C_COMPILER_ID STREQUAL "GNU") AND (NOT (CMAKE_C_COMPILER_VERSION VERSION_LESS 4.6)))
     message(STATUS "C Compiler supports: -Wno-unused-but-set-variable")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-unused-but-set-variable ")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-but-set-variable ")
+    set(FLAGS "${FLAGS} -Wno-unused-but-set-variable " CACHE STRING "Compilation flags")
   endif()
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL Debug)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${DEBUG_FLAGS} -DSS_DEBUG")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${DEBUG_FLAGS} -DSS_DEBUG")
-  message(STATUS "Generating debugging symbols and enabling debugging code")
-elseif(CMAKE_BUILD_TYPE STREQUAL RelWithDebInfo)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${DEBUG_FLAGS}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${DEBUG_FLAGS}")
-  message(STATUS "Generating debugging symbols")
-endif()
 
-if(DEFINED OLEVEL )
+IF(DEFINED OLEVEL)
   if((OLEVEL GREATER -1) AND (OLEVEL LESS 4) )
-  	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O${OLEVEL}")
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O${OLEVEL}")
+    set(FLAGS "${FLAGS} -O${OLEVEL}" CACHE STRING "Compilation flags"  FORCE)
 	message(STATUS "Optimization level at: ${OLEVEL}")
   else()
 	message(WARNING "Optimization level was set to a bad value, ignoring it. (Valid values are 0-3)")
@@ -90,15 +126,34 @@ if(DEFINED OLEVEL )
 endif()
 
 if(GCOV)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
+  set(FLAGS "${FLAGS} -fprofile-arcs -ftest-coverage" CACHE STRING "Compilation flags"  FORCE)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lgcov")
 endif()
 
 if(FAKE_CODE)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DFAKE_CODE")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DFAKE_CODE")
+  set(FLAGS "${FLAGS} -DFAKE_CODE" CACHE STRING "Compilation flags"  FORCE)
 endif()
+
+if(PROFILE)
+  message(STATUS "Profiling executables")
+  set(FLAGS "${FLAGS} -pg " CACHE STRING "Compilation flags" FORCE)
+endif()
+
+if(USE_C99)
+  message(STATUS "Using C99 standard")
+  set(CMAKE_C_FLAGS "-std=c99 -D_GNU_SOURCE=1 ${FLAGS}")
+else()
+  set(CMAKE_C_FLAGS "${FLAGS}")
+endif()
+
+set(CMAKE_C_FLAGS_DEBUG "${DEBUG_FLAGS} -DSS_DEBUG -DLOG_ASSERT")
+set(CMAKE_C_FLAGS_RELEASE "")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-ggdb")
+
+set(CMAKE_CXX_FLAGS "${FLAGS}")
+set(CMAKE_CXX_FLAGS_DEBUG "${DEBUG_FLAGS} -DSS_DEBUG -DLOG_ASSERT")
+set(CMAKE_CXX_FLAGS_RELEASE "")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-ggdb")
 
 subdirs(MYSQL_DIR_ALL ${MYSQL_DIR})
 foreach(DIR ${MYSQL_DIR_ALL})
@@ -125,32 +180,39 @@ if(NOT WITHOUT_MAXADMIN)
   add_subdirectory(client)
 endif()
 
-
+# Generate text versions of some documents
 execute_process(COMMAND perl ${CMAKE_SOURCE_DIR}/Documentation/format.pl 
 ${CMAKE_SOURCE_DIR}/Documentation/Changelog.md
 ${CMAKE_BINARY_DIR}/Changelog.txt)
 execute_process(COMMAND perl ${CMAKE_SOURCE_DIR}/Documentation/format.pl 
-${CMAKE_SOURCE_DIR}/Documentation/Release-Notes/MaxScale-1.1-Release-Notes.md
+${CMAKE_SOURCE_DIR}/Documentation/Release-Notes/MaxScale-1.2.0-Release-Notes.md
  ${CMAKE_BINARY_DIR}/ReleaseNotes.txt)
 execute_process(COMMAND perl ${CMAKE_SOURCE_DIR}/Documentation/format.pl 
-${CMAKE_SOURCE_DIR}/Documentation/Upgrading-To-MaxScale-1.1.0.md
- ${CMAKE_BINARY_DIR}/UpgradingToMaxScale110.txt)
-install(FILES ${CMAKE_BINARY_DIR}/Changelog.txt DESTINATION .)
-install(FILES ${CMAKE_BINARY_DIR}/ReleaseNotes.txt DESTINATION .)
-install(FILES ${CMAKE_BINARY_DIR}/UpgradingToMaxScale110.txt DESTINATION .)
+${CMAKE_SOURCE_DIR}/Documentation/Upgrading/Upgrading-To-MaxScale-1.2.md
+ ${CMAKE_BINARY_DIR}/UpgradingToMaxScale12.txt)
 
-message(STATUS "Installing MaxScale to: ${CMAKE_INSTALL_PREFIX}/")
 
-install(FILES server/MaxScale_template.cnf DESTINATION etc)
-install(FILES ${ERRMSG} DESTINATION mysql)
-install(FILES ${CMAKE_SOURCE_DIR}/COPYRIGHT DESTINATION .)
-install(FILES ${CMAKE_SOURCE_DIR}/README DESTINATION .)
-install(FILES ${CMAKE_SOURCE_DIR}/LICENSE DESTINATION .)
-install(DIRECTORY DESTINATION log)
+install(FILES ${CMAKE_BINARY_DIR}/Changelog.txt DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES ${CMAKE_BINARY_DIR}/ReleaseNotes.txt DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES ${CMAKE_BINARY_DIR}/UpgradingToMaxScale12.txt DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES server/maxscale_template.cnf DESTINATION ${MAXSCALE_SHAREDIR})
+if(WITH_MAXSCALE_CNF)
+  install(FILES server/maxscale_template.cnf DESTINATION ${MAXSCALE_CONFDIR} RENAME maxscale.cnf.template)
+endif()
+install(FILES server/maxscale_binlogserver_template.cnf DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES ${ERRMSG} DESTINATION ${MAXSCALE_VARDIR}/lib/maxscale 
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+install(FILES ${CMAKE_SOURCE_DIR}/COPYRIGHT DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/README DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/LICENSE DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES etc/lsyncd_example.conf DESTINATION ${MAXSCALE_SHAREDIR})
+install(FILES Documentation/maxscale.1 DESTINATION ${CMAKE_INSTALL_DATADIR}/man/man1)
+
 
 # Install startup scripts and ldconfig files
 if(WITH_SCRIPTS)
   configure_file(${CMAKE_SOURCE_DIR}/maxscale.conf.in ${CMAKE_BINARY_DIR}/maxscale.conf @ONLY)
+  configure_file(${CMAKE_SOURCE_DIR}/etc/maxscale.service.in ${CMAKE_BINARY_DIR}/maxscale.service @ONLY)
   if(DEB_BASED)
     configure_file(${CMAKE_SOURCE_DIR}/etc/ubuntu/init.d/maxscale.in ${CMAKE_BINARY_DIR}/maxscale @ONLY)    
   else()
@@ -159,88 +221,94 @@ if(WITH_SCRIPTS)
   if(PACKAGE)
     message(STATUS "maxscale.conf will unpack to: /etc/ld.so.conf.d")
     message(STATUS "startup scripts will unpack to to: /etc/init.d")
+    message(STATUS "systemd service files will unpack to to: /usr/lib/systemd/system")
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale DESTINATION ${MAXSCALE_SHAREDIR} 
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale.conf DESTINATION ${MAXSCALE_SHAREDIR}
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale.service DESTINATION ${MAXSCALE_SHAREDIR}
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
   else()
   install(FILES ${CMAKE_BINARY_DIR}/maxscale DESTINATION /etc/init.d 
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
   install(FILES ${CMAKE_BINARY_DIR}/maxscale.conf DESTINATION /etc/ld.so.conf.d 
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale.service DESTINATION /usr/lib/systemd/system
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
   message(STATUS "Installing maxscale.conf to: /etc/ld.so.conf.d")
   message(STATUS "Installing startup scripts to: /etc/init.d")
+  message(STATUS "Installing systemd service files to: /usr/lib/systemd/system")
   endif()
 endif()
 
+# Only do packaging if configured
 if(PACKAGE)
-  install(FILES ${CMAKE_BINARY_DIR}/maxscale DESTINATION .
+
+  execute_process(COMMAND uname -m COMMAND tr -d '\n' OUTPUT_VARIABLE CPACK_PACKAGE_ARCHITECTURE)
+  # Install the files copied by the postinst script into the share folder
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale DESTINATION ${MAXSCALE_SHAREDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-  install(FILES ${CMAKE_BINARY_DIR}/maxscale.conf DESTINATION .
+  install(FILES ${CMAKE_BINARY_DIR}/maxscale.conf DESTINATION ${MAXSCALE_SHAREDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-  install(FILES ${CMAKE_BINARY_DIR}/postinst DESTINATION .
+  install(FILES ${CMAKE_BINARY_DIR}/postinst DESTINATION ${MAXSCALE_SHAREDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-  install(FILES ${CMAKE_BINARY_DIR}/postrm DESTINATION .
+  install(FILES ${CMAKE_BINARY_DIR}/postrm DESTINATION ${MAXSCALE_SHAREDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
   if(${CMAKE_VERSION} VERSION_LESS 2.8.12)
     message(WARNING "CMake version is ${CMAKE_VERSION}. Building of packages requires version 2.8.12 or greater.")
   else()
-    # See if we are on a RPM-capable or DEB-capable system
-    find_program(RPMBUILD rpmbuild)
-    find_program(DEBBUILD dpkg-buildpackage)
-    set(CPACK_GENERATOR "TGZ")
-    if(NOT ( ${RPMBUILD} STREQUAL "RPMBUILD-NOTFOUND" ) )
-      message(STATUS "Generating RPM packages")
-      set(CPACK_GENERATOR "${CPACK_GENERATOR};RPM")
-    endif()
 
-    if(NOT ( ${DEBBUILD} STREQUAL "DEBBUILD-NOTFOUND" ) )
-      set(CPACK_GENERATOR "${CPACK_GENERATOR};DEB")
-      execute_process(COMMAND dpgk --print-architecture OUTPUT_VARIABLE DEB_ARCHITECTURE)
-      set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE ${DEB_ARCHITECTURE})
-      set (CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON) 
-      message(STATUS "Generating DEB packages for ${DEB_ARCHITECTURE}")
-    endif()
-
+    # Generic CPack configuration variables
+    SET(CPACK_SET_DESTDIR ON)
+    set(CPACK_STRIP_FILES FALSE)
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "MaxScale")
     set(CPACK_PACKAGE_VERSION_MAJOR "${MAXSCALE_VERSION_MAJOR}")
     set(CPACK_PACKAGE_VERSION_MINOR "${MAXSCALE_VERSION_MINOR}")
     set(CPACK_PACKAGE_VERSION_PATCH "${MAXSCALE_VERSION_PATCH}")
     set(CPACK_PACKAGE_CONTACT "MariaDB Corporation Ab")
-    set(CPACK_PACKAGE_FILE_NAME "maxscale-${MAXSCALE_VERSION}")
+    if(DISTRIB_SUFFIX)
+      set(CPACK_PACKAGE_FILE_NAME "maxscale-${MAXSCALE_VERSION}-${MAXSCALE_BUILD_NUMBER}.${DISTRIB_SUFFIX}.${CPACK_PACKAGE_ARCHITECTURE}")
+    else()
+      set(CPACK_PACKAGE_FILE_NAME "maxscale-${MAXSCALE_VERSION}-${MAXSCALE_BUILD_NUMBER}.${CPACK_PACKAGE_ARCHITECTURE}")
+    endif()
     set(CPACK_PACKAGE_NAME "maxscale")
     set(CPACK_PACKAGE_VENDOR "MariaDB Corporation Ab")
     set(CPACK_PACKAGE_DESCRIPTION_FILE ${CMAKE_SOURCE_DIR}/etc/DESCRIPTION)
     set(CPACK_PACKAGING_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
-    set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${CMAKE_BINARY_DIR}/postinst;{CMAKE_BINARY_DIR}/postrm")
-    set(CPACK_RPM_PACKAGE_RELEASE 1)
-    set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE ${CMAKE_BINARY_DIR}/postinst)
-    set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_BINARY_DIR}/postrm)
-    set(CPACK_RPM_PACKAGE_NAME "maxscale")
-    set(CPACK_RPM_PACKAGE_VENDOR "MariaDB Corporation Ab")
-    set(CPACK_RPM_PACKAGE_LICENSE "GPLv2")
-    set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION "/etc /etc/ld.so.conf.d /etc/init.d /etc/rc.d/init.d")
-    set(CPACK_RPM_SPEC_MORE_DEFINE "%define ignore \#")
-    set(CPACK_RPM_USER_FILELIST "%ignore /etc/init.d")
-    set(CPACK_RPM_USER_FILELIST "%ignore /etc/ld.so.conf.d")
-    set(CPACK_RPM_USER_FILELIST "%ignore /etc")  
+
+    # See if we are on a RPM-capable or DEB-capable system
+    find_program(RPMBUILD rpmbuild)
+    find_program(DEBBUILD dpkg-buildpackage)
+    set(CPACK_GENERATOR "TGZ")
+
+    if(NOT ( ${RPMBUILD} STREQUAL "RPMBUILD-NOTFOUND" ) )
+      include(cmake/package_rpm.cmake)
+      message(STATUS "Generating RPM packages")
+    endif()
+    if(NOT ( ${DEBBUILD} STREQUAL "DEBBUILD-NOTFOUND" ) )
+      include(cmake/package_deb.cmake)
+      message(STATUS "Generating DEB packages for ${DEB_ARCHITECTURE}")
+    endif()
+
     include(CPack)
   endif()
 endif()
 
 add_custom_target(buildtests
-  COMMAND ${CMAKE_COMMAND} -DDEPS_OK=Y -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
+  COMMAND ${CMAKE_COMMAND} -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
   COMMAND make
   COMMENT "Building test suite..." VERBATIM
 ) 
 
 add_custom_target(testall 
-  COMMAND ${CMAKE_COMMAND} -DDEPS_OK=Y -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
+  COMMAND ${CMAKE_COMMAND} ${CMAKE_SOURCE_DIR} -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N -DWITH_MAXSCALE_CNF=N -DMAXSCALE_VARDIR=${CMAKE_BINARY_DIR}
   COMMAND make install
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/server/test/MaxScale_test.cnf ${CMAKE_BINARY_DIR}/etc/MaxScale.cnf
   COMMAND ${CMAKE_COMMAND} -P ${CMAKE_SOURCE_DIR}/cmake/testall.cmake
   COMMENT "Running full test suite..." VERBATIM)
 
 add_custom_target(testcore
-  COMMAND ${CMAKE_COMMAND} -DDEPS_OK=Y -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
+  COMMAND ${CMAKE_COMMAND} ${CMAKE_SOURCE_DIR} -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N -DWITH_MAXSCALE_CNF=N -DMAXSCALE_VARDIR=${CMAKE_BINARY_DIR}
   COMMAND make install
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/server/test/MaxScale_test.cnf ${CMAKE_BINARY_DIR}/etc/MaxScale.cnf
   COMMAND ctest -R Internal
   COMMENT "Running core test suite..." VERBATIM)
 
@@ -270,7 +338,7 @@ endif()
 # Testall target with Valgrind
 if(VALGRIND_FOUND)
 add_custom_target(testall-valgrind
-  COMMAND ${CMAKE_COMMAND} -DDEPS_OK=Y -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
+  COMMAND ${CMAKE_COMMAND} -DBUILD_TESTS=Y -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR} -DWITH_SCRIPTS=N ${CMAKE_SOURCE_DIR}
   COMMAND make install
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/server/test/MaxScale_test.cnf ${CMAKE_BINARY_DIR}/etc/MaxScale.cnf
   COMMAND /bin/sh -c "valgrind --track-fds=yes  --leak-check=full --show-leak-kinds=all --log-file=${CMAKE_BINARY_DIR}/valgrind.log ${CMAKE_BINARY_DIR}/bin/maxscale -c ${CMAKE_BINARY_DIR} &>/dev/null"

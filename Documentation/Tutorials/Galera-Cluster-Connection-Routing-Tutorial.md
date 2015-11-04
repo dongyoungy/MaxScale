@@ -60,7 +60,7 @@ If you wish to use two different usernames for the two different roles of monito
 
 ### Creating Your MaxScale Configuration
 
-MaxScale configuration is held in an ini file that is located in the file MaxScale.cnf in the directory $MAXSCALE_HOME/etc, if you have installed in the default location then this file is available in /usr/local/mariadb-maxscale/etc/MaxScale.cnf.  This is not created as part of the installation process and must be manually created. A template file does exist within this directory that may be use as a basis for your configuration.
+MaxScale configuration is held in an ini file that is located in the file maxscale.cnf in the directory /etc, if you have installed in the default location then this file is available in /etc/maxscale.cnf.  This is not created as part of the installation process and must be manually created. A template file does exist within the /usr/share/maxscale directory that may be use as a basis for your configuration.
 
 A global, maxscale, section is included within every MaxScale configuration file; this is used to set the values of various MaxScale wide parameters, perhaps the most important of these is the number of threads that MaxScale will use to execute the code that forwards requests and handles responses for clients.
 
@@ -89,7 +89,7 @@ In order to instruct the router to which servers it should route we must add rou
 
 The final step in the service section is to add the username and password that will be used to populate the user data from the database cluster. There are two options for representing the password, either plain text or encrypted passwords may be used. In order to use encrypted passwords a set of keys must be generated that will be used by the encryption and decryption process. To generate the keys use the maxkeys command and pass the name of the secrets file in which the keys are stored.
 
-	% maxkeys /usr/local/mariadb-maxscale/etc/.secrets
+	% maxkeys /var/lib/maxscale/.secrets
 	%
 
 Once the keys have been created the maxpasswd command can be used to generate the encrypted password.
@@ -108,7 +108,7 @@ The username and password, either encrypted or plain text, are stored in the ser
 	user=maxscale
 	passwd=96F99AA1315BDC3604B006F427DD9484
 
-This completes the definitions required by the service, however listening ports must be associated with a service in order to allow network connections. This is done by creating a series of listener sections. These sections again are named for the convenience of the administrator and should be of type listener with an entry labelled service which contains the name of the service to associate the listener with. Each service may have multiple listeners.
+This completes the definitions required by the service, however listening ports must be associated with a service in order to allow network connections. This is done by creating a series of listener sections. These sections again are named for the convenience of the administrator and should be of type listener with an entry labeled service which contains the name of the service to associate the listener with. Each service may have multiple listeners.
 
 	[Galera Listener]
 	type=listener
@@ -123,7 +123,7 @@ A listener must also define the protocol module it will use for the incoming net
 	port=4306
 	socket=/tmp/DB.Cluster
 
-An address parameter may be given if the listener is required to bind to a particular network address when using hosts with multiple network addresses. The default behaviour is to listen on all network interfaces.
+An address parameter may be given if the listener is required to bind to a particular network address when using hosts with multiple network addresses. The default behavior is to listen on all network interfaces.
 
 The next stage is the configuration is to define the server information. This defines how to connect to each of the servers within the cluster, again a section is created for each server, with the type set to server, the network address and port to connect to and the protocol to use to connect to the server. Currently the protocol for all database connections in MySQLBackend.
 
@@ -178,7 +178,7 @@ or
 
 	% service maxscale start
 
-Check the error log in /usr/local/mariadb-maxscale/log to see if any errors are detected in the configuration file and to confirm MaxScale has been started. Also the maxadmin command may be used to confirm that MaxScale is running and the services, listeners etc have been correctly configured.
+Check the error log in /var/log/maxscale to see if any errors are detected in the configuration file and to confirm MaxScale has been started. Also the maxadmin command may be used to confirm that MaxScale is running and the services, listeners etc have been correctly configured.
 
 	% maxadmin -pmariadb list services
 
@@ -199,7 +199,7 @@ Check the error log in /usr/local/mariadb-maxscale/log to see if any errors are 
 	dbserv3            | 192.168.2.3     |  3306 |           0 | Running, Synced, Slave
 	-------------------+-----------------+-------+-------------+--------------------
 
-A Galera Cluster is a multi-master clustering technology, however the monitor is able to impose false notions of master and slave roles within a Galera Cluster in order to facilitate the use of Galera as if it were a standard MySQL Replication setup. This is merely an internal MaxScale convenience and has no impact on the behaviour of the cluster.
+A Galera Cluster is a multi-master clustering technology, however the monitor is able to impose false notions of master and slave roles within a Galera Cluster in order to facilitate the use of Galera as if it were a standard MySQL Replication setup. This is merely an internal MaxScale convenience and has no impact on the behavior of the cluster.
 
 	% maxadmin -pmariadb list listeners
 

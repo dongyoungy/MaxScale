@@ -50,7 +50,21 @@
 # define ss_prof(exp)
 #endif /* SS_DEBUG || SS_PROF */
 
-#if defined(SS_DEBUG)
+#if defined(SS_DEBUG) && defined(LOG_ASSERT)
+#include <log_manager.h>
+# define ss_dassert(exp) if(!(exp)){(skygw_log_write(LE,\
+                "debug assert %s:%d\n", \
+                (char*)__FILE__, \
+                __LINE__));skygw_log_sync_all();assert(exp);}
+#define ss_info_dassert(exp,info) if(!(exp)){(skygw_log_write(LE,\
+                "debug assert %s:%d %s\n", \
+                (char*)__FILE__, \
+                __LINE__,info));skygw_log_sync_all();assert(exp);}
+# define ss_debug(exp) exp
+# define ss_dfprintf fprintf
+# define ss_dfflush  fflush
+# define ss_dfwrite  fwrite
+#elif defined(SS_DEBUG)
 
 # define ss_debug(exp) exp
 # define ss_dfprintf fprintf
@@ -117,6 +131,7 @@ typedef enum skygw_chk_t {
     CHK_NUM_DCB,
     CHK_NUM_PROTOCOL,
     CHK_NUM_SESSION,
+    CHK_NUM_SERVER,
     CHK_NUM_ROUTER_SES,
     CHK_NUM_MY_SESCMD,
     CHK_NUM_ROUTER_PROPERTY,
@@ -199,6 +214,7 @@ typedef enum skygw_chk_t {
                             ((s) == SESSION_STATE_READY ? "SESSION_STATE_READY" : \
                              ((s) == SESSION_STATE_LISTENER ? "SESSION_STATE_LISTENER" : \
                               ((s) == SESSION_STATE_LISTENER_STOPPED ? "SESSION_STATE_LISTENER_STOPPED" : \
+                              (s) == SESSION_STATE_ROUTER_READY ? "SESSION_STATE_ROUTER_READY":\
                                "SESSION_STATE_UNKNOWN"))))
 
 #define STRPROTOCOLSTATE(s) ((s) == MYSQL_ALLOC ? "MYSQL_ALLOC" :       \
@@ -491,6 +507,12 @@ typedef enum skygw_chk_t {
                             "Session under- or overflow");              \
     }
 
+#define CHK_SERVER(s) {                                          \
+            ss_info_dassert(s->server_chk_top == CHK_NUM_SERVER &&  \
+                            s->server_chk_tail == CHK_NUM_SERVER,         \
+                            "Server under- or overflow");              \
+    }
+
 #define CHK_GWBUF(b) {                                                  \
             ss_info_dassert(((char *)(b)->start <= (char *)(b)->end),   \
                             "gwbuf start has passed the endpoint");     \
@@ -552,7 +574,7 @@ typedef enum skygw_chk_t {
 
 
 #if defined(FAKE_CODE)
-bool conn_open[10240];
+static bool conn_open[10240];
 #endif /* FAKE_CODE */
 
 #endif /* SKYGW_DEBUG_H */

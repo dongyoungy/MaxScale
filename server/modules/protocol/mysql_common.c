@@ -36,6 +36,7 @@
  * 03/10/2014	Massimiliano Pinto	Added netmask for wildcard in IPv4 hosts.
  * 24/10/2014	Massimiliano Pinto	Added Mysql user@host @db authentication support
  * 10/11/2014	Massimiliano Pinto	Charset at connect is passed to backend during authentication
+ * 07/07/15     Martin Brampton         Fix problem recognising null password
  *
  */
 
@@ -44,6 +45,10 @@
 #include <skygw_types.h>
 #include <skygw_utils.h>
 #include <log_manager.h>
+#include <netinet/tcp.h>
+
+/* The following can be compared using memcmp to detect a null password */
+uint8_t null_client_sha1[MYSQL_SCRAMBLE_LEN]="";
 
 /** Defined in log_manager.cc */
 extern int            lm_enabled_logfiles_bitmask;
@@ -85,13 +90,14 @@ MySQLProtocol* mysql_protocol_init(
         if (p == NULL) {
             int eno = errno;
             errno = 0;
+            char errbuf[STRERROR_BUFLEN];
             LOGIF(LE, (skygw_log_write_flush(
                     LOGFILE_ERROR,
                     "%lu [mysql_init_protocol] MySQL protocol init failed : "
                     "memory allocation due error  %d, %s.",
                     pthread_self(),
                     eno,
-                    strerror(eno))));
+                    strerror_r(eno, errbuf, sizeof(errbuf)))));
             goto return_p;
         }
         p->protocol_state = MYSQL_PROTOCOL_ALLOC;
@@ -137,7 +143,7 @@ void mysql_protocol_done (
                 goto retblock;
         }
         scmd = p->protocol_cmd_history;
-        
+
         while (scmd != NULL)
         {
                 scmd2 = scmd->scom_next;
@@ -168,7 +174,7 @@ int gw_read_backend_handshake(
 	int  success = 0;
 	int packet_len = 0;
 
-	if ((n = dcb_read(dcb, &head)) != -1) 
+	if ((n = dcb_read(dcb, &head, 0)) != -1) 
         {
 	    
 	dcb->last_read = hkheartbeat;
@@ -287,7 +293,7 @@ int gw_read_backend_handshake(
                                         pthread_self(),
                                         conn->owner_dcb->fd,
                                         pthread_self())));
-                                
+                                while((head = gwbuf_consume(head, GWBUF_LENGTH(head))));
 				return 1;
 			}
 
@@ -421,7 +427,7 @@ int gw_receive_backend_auth(
 	uint8_t *ptr = NULL;
         int      rc = 0;
 
-        n = dcb_read(dcb, &head);
+        n = dcb_read(dcb, &head, 0);
 
 	dcb->last_read = hkheartbeat;
 	
@@ -576,7 +582,7 @@ int gw_send_authentication_to_backend(
         if (strlen(dbname))
                 curr_db = dbname;
 
-        if (strlen((char *)passwd))
+        if (memcmp(passwd, null_client_sha1, MYSQL_SCRAMBLE_LEN))
                 curr_passwd = passwd;
 
 	dcb = conn->owner_dcb;
@@ -726,8 +732,8 @@ int gw_send_authentication_to_backend(
 
         rv = dcb_write(dcb, buffer);
 
-        if (rv < 0) {
-                return rv;
+        if (rv == 0) {
+                return 1;
         } else {
                 return 0;
         }
@@ -762,6 +768,7 @@ int gw_do_connect_to_backend(
 	so = socket(AF_INET,SOCK_STREAM,0);
         
 	if (so < 0) {
+                char errbuf[STRERROR_BUFLEN];
                 LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error: Establishing connection to backend server "
@@ -770,7 +777,7 @@ int gw_do_connect_to_backend(
                         host,
                         port,
                         errno,
-                        strerror(errno))));
+                        strerror_r(errno, errbuf, sizeof(errbuf)))));
                 rv = -1;
                 goto return_rv;
 	}
@@ -781,6 +788,7 @@ int gw_do_connect_to_backend(
 
 	if(setsockopt(so, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize)) != 0)
 	{
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
 			"Error: Failed to set socket options "
@@ -789,7 +797,7 @@ int gw_do_connect_to_backend(
 			host,
 			port,
 			errno,
-			strerror(errno))));
+			strerror_r(errno, errbuf, sizeof(errbuf)))));
 		rv = -1;
 		/** Close socket */
 		goto close_so;
@@ -798,6 +806,7 @@ int gw_do_connect_to_backend(
 
 	if(setsockopt(so, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize)) != 0)
 	{
+                char errbuf[STRERROR_BUFLEN];
                 LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
                         "Error: Failed to set socket options "
@@ -806,7 +815,25 @@ int gw_do_connect_to_backend(
                         host,
                         port,
                         errno,
-                        strerror(errno))));
+                        strerror_r(errno, errbuf, sizeof(errbuf)))));
+		rv = -1;
+		/** Close socket */
+		goto close_so;
+	}
+
+	int one = 1;
+	if(setsockopt(so, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0)
+	{
+                char errbuf[STRERROR_BUFLEN];
+                LOGIF(LE, (skygw_log_write_flush(
+                        LOGFILE_ERROR,
+                        "Error: Failed to set socket options "
+                        "%s:%d failed.\n\t\t             Socket configuration failed "
+                        "due %d, %s.",
+                        host,
+                        port,
+                        errno,
+                        strerror_r(errno, errbuf, sizeof(errbuf)))));
 		rv = -1;
 		/** Close socket */
 		goto close_so;
@@ -824,6 +851,7 @@ int gw_do_connect_to_backend(
                 } 
                 else 
 		{                        
+                        char errbuf[STRERROR_BUFLEN];
                         LOGIF(LE, (skygw_log_write_flush(
                                 LOGFILE_ERROR,
                                 "Error:  Failed to connect backend server %s:%d, "
@@ -831,7 +859,7 @@ int gw_do_connect_to_backend(
                                 host,
                                 port,
                                 errno,
-                                strerror(errno))));
+                                strerror_r(errno, errbuf, sizeof(errbuf)))));
 			/** Close socket */
 			goto close_so;
                 }
@@ -856,13 +884,14 @@ close_so:
 	/*< Close newly created socket. */
 	if (close(so) != 0)
 	{
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
 			"Error: Failed to "
 			"close socket %d due %d, %s.",
 			so,
 			errno,
-			strerror(errno))));
+			strerror_r(errno, errbuf, sizeof(errbuf)))));
 	}
 	goto return_rv;
 }
@@ -890,7 +919,11 @@ gw_mysql_protocol_state2string (int state) {
                 case MYSQL_AUTH_FAILED:
                         return "MySQL Authentication failed";
                 case MYSQL_IDLE:
-                        return "MySQL authentication is succesfully done.";
+		    return "MySQL authentication is succesfully done.";
+	case MYSQL_AUTH_SSL_REQ: return "MYSQL_AUTH_SSL_REQ";
+	case MYSQL_AUTH_SSL_HANDSHAKE_DONE: return "MYSQL_AUTH_SSL_HANDSHAKE_DONE";
+	case MYSQL_AUTH_SSL_HANDSHAKE_FAILED: return "MYSQL_AUTH_SSL_HANDSHAKE_FAILED";
+	case MYSQL_AUTH_SSL_HANDSHAKE_ONGOING: return "MYSQL_AUTH_SSL_HANDSHAKE_ONGOING";
                 default:
                         return "MySQL (unknown protocol state)";
         }
@@ -1100,7 +1133,7 @@ GWBUF* gw_create_change_user_packet(
 		curr_db = db;
 	}
 	
-	if (strlen((char *)pwd) > 0)
+	if (memcmp(pwd, null_client_sha1, MYSQL_SCRAMBLE_LEN))
 	{
 		curr_passwd = pwd;
 	}	
@@ -1319,7 +1352,7 @@ int gw_check_mysql_scramble_data(DCB *dcb, uint8_t *token, unsigned int token_le
 
 	if (ret_val) {
 		/* if password was sent, fill stage1_hash with at least 1 byte in order
-		 * to create rigth error message: (using password: YES|NO)
+		 * to create right error message: (using password: YES|NO)
 		 */
 		if (token_len)
 			memcpy(stage1_hash, (char *)"_", 1);
@@ -1336,12 +1369,7 @@ int gw_check_mysql_scramble_data(DCB *dcb, uint8_t *token, unsigned int token_le
 		gw_bin2hex(hex_double_sha1, password, SHA_DIGEST_LENGTH);
 	} else {
 		/* check if the password is not set in the user table */
-		if (!strlen((char *)password)) {
-			/* Username without password */
-			return 0;
-		} else {
-			return 1;
-		}
+		return memcmp(password, null_client_sha1, MYSQL_SCRAMBLE_LEN) ? 1 : 0;
 	}
 
 	/*<
@@ -1362,7 +1390,7 @@ int gw_check_mysql_scramble_data(DCB *dcb, uint8_t *token, unsigned int token_le
 	/*<
 	 * step2: STEP2 = XOR(token, STEP1)
 	 *
-	 * token is trasmitted form client and it's based on the handshake scramble and SHA1(real_passowrd)
+	 * token is transmitted form client and it's based on the handshake scramble and SHA1(real_passowrd)
 	 * step1 has been computed in the previous step
 	 * the result STEP2 is SHA1(the_password_to_check) and is SHA_DIGEST_LENGTH long
 	 */
@@ -1435,6 +1463,10 @@ int gw_find_mysql_user_password_sha1(char *username, uint8_t *gateway_password, 
 	memcpy(&key.ipv4, client, sizeof(struct sockaddr_in));
 	key.netmask = 32;
 	key.resource = client_data->db;
+    if(strlen(dcb->remote) < MYSQL_HOST_MAXLEN)
+    {
+        strcpy(key.hostname, dcb->remote);
+    }
 
 	LOGIF(LD,
 		(skygw_log_write_flush(
@@ -1461,16 +1493,6 @@ int gw_find_mysql_user_password_sha1(char *username, uint8_t *gateway_password, 
 				!dcb->service->localhost_match_wildcard_host) 
 			{
  			 	/* Skip the wildcard check and return 1 */
-				LOGIF(LE,
-					(skygw_log_write_flush(
-						LOGFILE_ERROR,
-						"Error : user %s@%s not found, try set "
-						"'localhost_match_wildcard_host=1' in "
-						"service definition of the configuration "
-						"file.",
-						key.user,
-						dcb->remote)));
-
 				break;
 			}
 
@@ -1524,7 +1546,12 @@ int gw_find_mysql_user_password_sha1(char *username, uint8_t *gateway_password, 
 					dcb->remote)));
 
 			user_password = mysql_users_fetch(service->users, &key);
-     
+
+			if (user_password)
+			{
+			    break;
+			}
+
 			if (!user_password) {
 				/*
 				 * user@% not found.
@@ -1546,7 +1573,6 @@ int gw_find_mysql_user_password_sha1(char *username, uint8_t *gateway_password, 
 			    break;
 			}
 
-			break;
 		}
 	}
 
@@ -2027,7 +2053,6 @@ void init_response_status (
          */
         ss_dassert(*nbytes_left > 0);
         ss_dassert(*npackets > 0);
-        ss_dassert(*npackets<128);
 }
 
 
@@ -2188,7 +2213,8 @@ char *create_auth_fail_str(
 	char	*username,
 	char	*hostaddr,
 	char	*sha1,
-	char	*db)
+	char	*db,
+	int errcode)
 {
 	char* errstr;
 	const char* ferrstr;
@@ -2203,6 +2229,10 @@ char *create_auth_fail_str(
 	{
 		ferrstr = "Access denied for user '%s'@'%s' (using password: %s) to database '%s'";
 	}
+	else if(errcode == MYSQL_FAILED_AUTH_SSL)
+	{
+	    ferrstr = "Access without SSL denied";
+	}
 	else
 	{
 		ferrstr = "Access denied for user '%s'@'%s' (using password: %s)";
@@ -2211,16 +2241,21 @@ char *create_auth_fail_str(
 	
 	if (errstr == NULL)
 	{
+                char errbuf[STRERROR_BUFLEN];
 		LOGIF(LE, (skygw_log_write_flush(
 			LOGFILE_ERROR,
 			"Error : Memory allocation failed due to %s.", 
-			strerror(errno)))); 
+			strerror_r(errno, errbuf, sizeof(errbuf))))); 
 		goto retblock;
 	}
 
 	if (db_len > 0)
 	{
 		sprintf(errstr, ferrstr, username, hostaddr, (*sha1 == '\0' ? "NO" : "YES"), db); 
+	}
+	else if(errcode == MYSQL_FAILED_AUTH_SSL)
+	{
+	    sprintf(errstr, "%s", ferrstr);
 	}
 	else
 	{

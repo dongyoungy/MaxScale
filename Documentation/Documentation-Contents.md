@@ -1,3 +1,4 @@
+
 [Search page for MaxScale Documentation](http://mariadb-corporation.github.io/MaxScale/Search/)
 
 # Contents
@@ -5,25 +6,31 @@
 ## About MaxScale
 
  - [About MaxScale](About/About-MaxScale.md)
- - [Release Notes 1.1](Release-Notes/MaxScale-1.1-Release-Notes.md)
+ - [MaxScale 1.2.0 Release Notes](Release-Notes/MaxScale-1.2.0-Release-Notes.md)
  - [Changelog](Changelog.md)
  - [Limitations](About/Limitations.md)
  - [COPYRIGHT](About/COPYRIGHT.md)
  - [LICENSE](About/LICENSE.md)
- - [SETUP](About/SETUP.md)
 
 ## Getting Started
 
- - [Getting Started with MaxScale](Getting-Started/Getting-Started-With-MaxScale.md)
+ - [MariaDB MaxScale Installation Guide](Getting-Started/MariaDB-MaxScale-Installation-Guide.md)
  - [Building MaxScale from Source Code](Getting-Started/Building-MaxScale-from-Source-Code.md)
  - [Configuration Guide](Getting-Started/Configuration-Guide.md)
+
+## Upgrading MaxScale
+
+- [Upgrading MaxScale from 1.1.1 to 1.2](Upgrading/Upgrading-To-MaxScale-1.2.md)
+- [Upgrading MaxScale from 1.0.5 to 1.1.0](Upgrading/Upgrading-To-MaxScale-1.1.0.md)
 
 ## Reference
 
  - [MaxAdmin](Reference/MaxAdmin.md)
  - [MaxScale HA with Corosync-Pacemaker](Reference/MaxScale-HA-with-Corosync-Pacemaker.md)
+ - [MaxScale HA with Lsyncd](Reference/MaxScale-HA-with-lsyncd.md)
  - [How Errors are Handled in MaxScale](Reference/How-errors-are-handled-in-MaxScale.md)
  - [Debug and Diagnostic Support](Reference/Debug-And-Diagnostic-Support.md)
+ - [Routing Hints](Reference/Hint-Syntax.md)
  
 ## Tutorials
 
@@ -31,30 +38,42 @@
  - [Filter Tutorial](Tutorials/Filter-Tutorial.md)
  - [Galera Cluster Connection Routing Tutorial](Tutorials/Galera-Cluster-Connection-Routing-Tutorial.md)
  - [Galera Cluster Read-Write Splitting Tutorial](Tutorials/Galera-Cluster-Read-Write-Splitting-Tutorial.md)
- - [MaxScale Information Schema Tutorial](Tutorials/MaxScale-Informaton-Schema.md)
+ - [MaxScale Information Schema Tutorial](Tutorials/MaxScale-Information-Schema.md)
  - [MySQL Replication Connection Routing Tutorial](Tutorials/MySQL-Replication-Connection-Routing-Tutorial.md)
  - [MySQL Replication Read-Write Splitting Tutorial](Tutorials/MySQL-Replication-Read-Write-Splitting-Tutorial.md)
  - [MySQL Cluster Setup](Tutorials/MySQL-Cluster-Setup.md)
  - [Replication Proxy with the Binlog Router Tutorial](Tutorials/Replication-Proxy-Binlog-Router-Tutorial.md)
  - [RabbitMQ Setup and MaxScale Integration Tutorial](Tutorials/RabbitMQ-Setup-And-MaxScale-Integration.md)
  - [Nagios Plugins for MaxScale Tutorial](Tutorials/Nagios-Plugins.md)
-
-## Filters
-
- - [Query Log All](filters/Query-Log-All-Filter.md)
- - [Regex Filter](filters/Regex-Filter.md)
- - [Tee Filter](filters/Tee-Filter.md)
- - [Top N Filter](filters/Top-N-Filter.md)
- - [Database Firewall Filter](filters/Database-Firewall-Filter.md)
- - [RabbitMQ Filter](filters/RabbitMQ-Filter.md)
-
-## Utilities
-
- - [RabbitMQ Consumer Client](filters/RabbitMQ-Consumer-Client.md)
+ - [Simple Schema Sharding Tutorial](Tutorials/Simple-Sharding-Tutorial.md)
 
 ## Routers
 
- - [Simple Schema Sharding Router](routers/schemarouter/SchemaRouter.md)
+ - [Read Write Split](Routers/ReadWriteSplit.md)
+ - [Read Connnection Router](Routers/ReadConnRoute.md)
+ - [Schemarouter](Routers/SchemaRouter.md)
+
+## Filters
+
+Here are detailed documents about the filters MaxScale offers. They contain configuration guides and example use cases. Before reading these,you should have read the filter tutorial so that you know how they work and how to configure them.
+
+ - [Query Log All](Filters/Query-Log-All-Filter.md)
+ - [Regex Filter](Filters/Regex-Filter.md)
+ - [Tee Filter](Filters/Tee-Filter.md)
+ - [Top N Filter](Filters/Top-N-Filter.md)
+ - [Database Firewall Filter](Filters/Database-Firewall-Filter.md)
+ - [RabbitMQ Filter](Filters/RabbitMQ-Filter.md)
+ - [Named Server Filter](Filters/Named-Server-Filter.md)
+
+## Monitors
+ - [MySQL Monitor](Monitors/MySQL-Monitor.md)
+ - [Galera Monitor](Monitors/Galera-Monitor.md)
+ - [Multi-Master Monitor](Monitors/MM-Monitor.md)
+ - [MySQL Cluster Monitor](Monitors/NDB-Cluster-Monitor.md)
+
+## Utilities
+
+ - [RabbitMQ Consumer Client](Filters/RabbitMQ-Consumer-Client.md)
 
 ## Design Documents
 
@@ -71,4 +90,7 @@
  - [MaxScale 1.0 Release Notes](Release-Notes/MaxScale-1.0-Release-Notes.md)
  - [MaxScale 1.0.1 Release Notes](Release-Notes/MaxScale-1.0.1-Release-Notes.md)
  - [MaxScale 1.0.3 Release Notes](Release-Notes/MaxScale-1.0.3-Release-Notes.md)
+ - [MaxScale 1.1.0 Release Notes](Release-Notes/MaxScale-1.1-Release-Notes.md)
+ - [MaxScale 1.1.1 Release Notes](Release-Notes/MaxScale-1.1.1-Release-Notes.md)
+ - [MaxScale 1.2.0 Release Notes](Release-Notes/MaxScale-1.2.0-Release-Notes.md)
 

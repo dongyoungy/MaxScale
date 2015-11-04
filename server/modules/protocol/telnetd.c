@@ -67,6 +67,7 @@ extern __thread log_info_t tls_log_info;
  * Date		Who			Description
  * 17/06/2013	Mark Riddoch		Initial version
  * 17/07/2013	Mark Riddoch		Addition of login phase
+ * 07/07/2015   Martin Brampton         Call unified dcb_close on error
  *
  * @endverbatim
  */
@@ -154,7 +155,7 @@ SESSION		*session = dcb->session;
 TELNETD		*telnetd = (TELNETD *)dcb->protocol;
 char		*password, *t;
 
-	if ((n = dcb_read(dcb, &head)) != -1)
+	if ((n = dcb_read(dcb, &head, 0)) != -1)
 	{
 
 		if (head)
@@ -315,13 +316,13 @@ int	n_connect = 0;
 
                         if (telnetd_pr == NULL)
                         {
-                                dcb_add_to_zombieslist(client_dcb);
+                                dcb_close(client_dcb);
 				return n_connect;
 			}
 
-			if (poll_add_dcb(client_dcb) == -1)
+			if (poll_add_dcb(client_dcb))
 			{
-                                dcb_add_to_zombieslist(dcb);
+                                dcb_close(dcb);
 				return n_connect;
 			}
 			n_connect++;
@@ -380,7 +381,8 @@ int			syseno = 0;
 	syseno = setsockopt(listener->fd, SOL_SOCKET, SO_REUSEADDR, (char *)&one, sizeof(one));
 	
 	if(syseno != 0){
-		LOGIF(LE, (skygw_log_write_flush(LOGFILE_ERROR,"Error: Failed to set socket options. Error %d: %s",errno,strerror(errno))));
+                char errbuf[STRERROR_BUFLEN];
+		LOGIF(LE, (skygw_log_write_flush(LOGFILE_ERROR,"Error: Failed to set socket options. Error %d: %s", errno, strerror_r(errno, errbuf, sizeof(errbuf)))));
 		return 0;
 	}
         // set NONBLOCKING mode
@@ -398,10 +400,11 @@ int			syseno = 0;
         } else {
             int eno = errno;
             errno = 0;
+            char errbuf[STRERROR_BUFLEN];
             fprintf(stderr,
                     "\n* Failed to start listening telnet due error %d, %s\n\n",
                     eno,
-                    strerror(eno));
+                    strerror_r(eno, errbuf, sizeof(errbuf)));
             return 0;
         }
 

@@ -1,7 +1,7 @@
 # About MaxScale
 The MariaDB Corporation **MaxScale** is an intelligent proxy that allows forwarding of database statements to one or more database servers using complex rules, which can be based on a semantic understanding of the database statements and the roles of the various servers within the backend cluster of databases.
 
-MaxScale is designed to provide load balancing and high availability functionality transparently to the applications. In addition it provides a highly scalable and flexibile architecture, with plugin components to support different protocols and routing decisions.
+MaxScale is designed to provide load balancing and high availability functionality transparently to the applications. In addition it provides a highly scalable and flexible architecture, with plugin components to support different protocols and routing decisions.
 
 MaxScale is implemented in C so as to operate speedily. It also makes extensive use of the asynchronous I/O capabilities of the Linux operating system. The epoll system is used to provide the event driven framework for the input and output via sockets. Similar features in Windows&reg; could be used in future development of MaxScale.
 
@@ -13,11 +13,11 @@ A Google Group exists for MaxScale that can be used to discuss ideas, issues and
 Send email to [maxscale@googlegroups.com](mailto:maxscale@googlegroups.com)
 	or use the [forum](http://groups.google.com/forum/#!forum/maxscale) interface
 	
-Bugs can be reported in the MariaDB Corporation bugs database
-	[bug.mariadb.com](http://bugs.mariadb.com)
+Bugs can be reported in the MariaDB Jira
+	[https://mariadb.atlassian.net](https://mariadb.atlassian.net)
 
 ## Installing MaxScale
-Information about installing MaxScale, either from a repository or by building from source code, is included in the guide [Getting Started with MaxScale](/Documentation/Getting-Started/Getting-Started-With-MaxScale.md).
+Information about installing MaxScale, either from a repository or by building from source code, is included in the [MariaDB MaxScale Installation Guide](../Getting-Started/MariaDB-MaxScale-Installation-Guide.md).
 
 The same guide also provides basic information on running MaxScale. More detailed information about configuring MaxScale is given in the [Configuration Guide](/Documentation/Getting-Started/Configuration-Guide.md).
 
