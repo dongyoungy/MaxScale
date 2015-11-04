@@ -26,9 +26,9 @@ add_library(topfilter SHARED topfilter.c)
 target_link_libraries(topfilter log_manager)
 install(TARGETS topfilter DESTINATION ${MAXSCALE_LIBDIR})
 
-add_library(luafilter SHARED luafilter.cc)
+add_library(luafilter SHARED luafilter.c)
 target_link_libraries(luafilter log_manager utils lua)
-install(TARGETS luafilter DESTINATION modules)
+install(TARGETS luafilter DESTINATION ${MAXSCALE_LIBDIR})
 
 add_library(dbfwfilter SHARED dbfwfilter.c)
 target_link_libraries(dbfwfilter log_manager query_classifier)
