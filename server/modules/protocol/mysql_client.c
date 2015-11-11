@@ -763,7 +763,7 @@ int gw_read_client_event(
                 {
 
 	                /** Ask what type of input the router expects */
-			cap = router->getCapabilities(router_instance, rsession);
+			cap = router->getCapabilities();
                        
 			if (cap == 0 || (cap == RCAP_TYPE_PACKET_INPUT))
 			{

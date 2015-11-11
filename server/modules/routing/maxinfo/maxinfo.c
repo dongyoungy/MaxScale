@@ -87,7 +87,7 @@ static	void 	closeSession(ROUTER *instance, void *router_session);
 static	void 	freeSession(ROUTER *instance, void *router_session);
 static	int	execute(ROUTER *instance, void *router_session, GWBUF *queue);
 static	void	diagnostics(ROUTER *instance, DCB *dcb);
-static  uint8_t getCapabilities (ROUTER* inst, void* router_session);
+static  int getCapabilities ();
 static  void             handleError(
         ROUTER           *instance,
         void             *router_session,
@@ -420,10 +420,8 @@ diagnostics(ROUTER *instance, DCB *dcb)
  *
  * Not used for the maxinfo router
  */
-static uint8_t
-getCapabilities(
-        ROUTER*  inst,
-        void*    router_session)
+static int
+getCapabilities()
 {
         return 0;
 }

@@ -89,7 +89,7 @@ static  void    errorReply(
         DCB     *backend_dcb,
         error_action_t     action,
 	bool	*succp);
-static  uint8_t getCapabilities (ROUTER* inst, void* router_session);
+static  int getCapabilities ();
 
 
 /** The module object definition */
@@ -1177,7 +1177,7 @@ static void rses_end_locked_router_action(ROUTER_SLAVE	* rses)
 }
 
 
-static uint8_t getCapabilities(ROUTER *inst, void *router_session)
+static int getCapabilities()
 {
         return RCAP_TYPE_NO_RSESSION;
 }
