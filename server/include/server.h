@@ -81,6 +81,7 @@ typedef struct server {
 #if defined(SS_DEBUG)
         skygw_chk_t     server_chk_top;
 #endif
+	SPINLOCK	lock;			/**< Common access lock */
 	char		*unique_name;	/**< Unique name for the server */
 	char		*name;		/**< Server name/IP address*/
 	unsigned short	port;		/**< Port to listen on */
@@ -208,4 +209,5 @@ extern DCB      *server_get_persistent(SERVER *, char *, const char *);
 extern void	server_update_address(SERVER *, char *);
 extern void	server_update_port(SERVER *,  unsigned short);
 extern RESULTSET	*serverGetList();
+extern unsigned int server_map_status(char *str);
 #endif

@@ -105,10 +105,6 @@
 #define ERROR_NO_SHOW_DATABASES "%s: Unable to load database grant information, \
     MaxScale authentication will proceed without including database permissions. \
     To correct this GRANT SHOW DATABASES ON *.* privilege to the user %s."
-/** Defined in log_manager.cc */
-extern int            lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
 
 static int getUsers(SERVICE *service, USERS *users);
 static int uh_cmpfun( void* v1, void* v2);
@@ -1122,19 +1118,21 @@ getAllUsers(SERVICE *service, USERS *users)
 
 		} else if(rc == -1) {
 		    /** Duplicate user*/
-		    LOGIF(LT,(skygw_log_write(LT,
-					     "Duplicate MySQL user found for service [%s]: %s@%s%s%s",
-					     service->name,
-					     row[0],row[1],havedb?" for database: ":"",
-					     havedb ?dbnm:"")));
+                if (service->log_auth_warnings)
+                {
+                    skygw_log_write(LM, "Duplicate MySQL user found for service"
+                                    " [%s]: %s@%s%s%s", service->name, row[0],
+                                    row[1], havedb ? " for database: " : "",
+                                    havedb ? dbnm : "");
+                }
 		} else {
-                    LOGIF(LE, (skygw_log_write_flush(
-                            LOGFILE_ERROR|LOGFILE_TRACE,
-                                                     "Warning: Failed to add user %s@%s for service [%s]. "
-                            "This user will be unavailable via MaxScale.",
-                                                     row[0],
-                                                     row[1],
-                                                     service->name)));
+                if (service->log_auth_warnings)
+                {
+                    skygw_log_write_flush(LM, "Warning: Failed to add user %s@%s"
+                                          " for service [%s]. This user will be "
+                                          "unavailable via MaxScale.", row[0],
+                                          row[1], service->name);
+                }
 		}
             }
             
@@ -1657,19 +1655,20 @@ getUsers(SERVICE *service, USERS *users)
 
 		} else if(rc == -1) {
 		    /** Duplicate user*/
-		    LOGIF(LE,(skygw_log_write(LT|LE,
-					     "Warning: Duplicate MySQL user found for service [%s]: %s@%s%s%s",
-					     service->name,
-					     row[0],row[1],db_grants?" for database: ":"",
-					     db_grants ?row[5]:"")));
+            if (service->log_auth_warnings)
+            {
+                skygw_log_write(LM, "Warning: Duplicate MySQL user found for "
+                                "service [%s]: %s@%s%s%s", service->name, row[0],
+                                row[1], db_grants ? " for database: " : "",
+                                db_grants ? row[5] : "");
+            }
 		} else {
-			LOGIF(LE, (skygw_log_write_flush(
-				LOGFILE_ERROR|LOGFILE_TRACE,
-				"Warning: Failed to add user %s@%s for service [%s]. "
-				"This user will be unavailable via MaxScale.",
-				row[0],
-				row[1],
-				service->name)));
+            if (service->log_auth_warnings)
+            {
+                skygw_log_write_flush(LM, "Warning: Failed to add user %s@%s for"
+                                      " service [%s]. This user will be unavailable"
+                                      " via MaxScale.", row[0], row[1], service->name);
+            }
 		}
 	}
 

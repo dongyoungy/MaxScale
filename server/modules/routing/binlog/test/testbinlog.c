@@ -51,9 +51,6 @@
 
 #include <version.h>
 
-extern int lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
 static void printVersion(const char *progname);
 static void printUsage(const char *progname);
 extern int blr_test_parse_change_master_command(char *input, char *error_string, CHANGE_MASTER_OPTIONS *config);
@@ -76,11 +73,9 @@ static struct option long_options[] = {
 };
 
 int main(int argc, char **argv) {
-        char** arg_vector;
         ROUTER_INSTANCE *inst;
         int ret;
 	int rc;
-	int arg_count = 4;
 	char error_string[BINLOG_ERROR_MSG_LEN + 1] = "";
 	CHANGE_MASTER_OPTIONS change_master;
 	char query[255+1]="";
@@ -94,21 +89,7 @@ int main(int argc, char **argv) {
 
 	roptions = strdup("server-id=3,heartbeat=200,binlogdir=/not_exists/my_dir,transaction_safety=1,master_version=5.6.99-common,master_hostname=common_server,master_uuid=xxx-fff-cccc-fff,master-id=999");
 
-	arg_vector = malloc(sizeof(char*)*(arg_count + 1));
-
-	if(arg_vector == NULL)
-	{
-		fprintf(stderr,"Error: Memory allocation FAILED for log manager arg_vector.\n");
-		return 1;
-	}
-
-	arg_vector[0] = "logmanager";
-	arg_vector[1] = "-j";
-	arg_vector[2] = "/tmp/maxbinlogcheck";
-	arg_vector[3] = "-o";
-	arg_vector[4] = NULL;
-	skygw_logmanager_init(arg_count,arg_vector);
-	free(arg_vector);
+	skygw_logmanager_init(NULL, NULL, LOG_TARGET_DEFAULT);
 
 	skygw_log_disable(LOGFILE_DEBUG);
 	skygw_log_disable(LOGFILE_TRACE);

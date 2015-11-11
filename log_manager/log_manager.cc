@@ -43,6 +43,9 @@
 # define _GNU_SOURCE
 #endif
 
+static const char LOGFILE_NAME_PREFIX[] = "error";
+static const char LOGFILE_NAME_SUFFIX[] = ".log";
+
 extern char *program_invocation_name;
 extern char *program_invocation_short_name;
 
@@ -52,10 +55,20 @@ static int block_start_index;
 static int prevval;
 static simple_mutex_t msg_mutex;
 #endif
-static int highprec = 0;
-static int do_syslog = 1;
-static int do_maxscalelog = 1;
-static int use_stdout = 0;
+static struct
+{
+    int highprec;       // Can change during the lifetime of log_manager.
+    int do_syslog;      // Can change during the lifetime of log_manager.
+    int do_maxscalelog; // Can change during the lifetime of log_manager.
+    int use_stdout;     // Can NOT changed during the lifetime of log_manager.
+} log_config =
+{
+    0, // highprec
+    1, // do_syslog
+    1, // do_maxscalelog
+    0  // use_stdout
+};
+
 /**
  * Variable holding the enabled logfiles information.
  * Used from log users to check enabled logs prior calling
@@ -87,11 +100,8 @@ ssize_t log_ses_count[LOGFILE_LAST] = {0};
  */
 const char* shm_pathname_prefix = "/dev/shm/";
 
-/** Logfile ids from call argument '-s' */
-char* shmem_id_str     = NULL;
 /** Errors are written to syslog too by default */
-char* syslog_id_str    = strdup("LOGFILE_ERROR");
-char* syslog_ident_str = NULL;
+char* syslog_id_str = strdup("LOGFILE_ERROR");
 
 /** Forward declarations
  */
@@ -174,14 +184,13 @@ struct logfile
     flat_obj_state_t lf_state;
     bool             lf_init_started;
     bool             lf_store_shmem;
-    bool             lf_write_syslog;
     logmanager_t*    lf_lmgr;
     /** fwr_logmes is for messages from log clients */
     skygw_message_t* lf_logmes;
     char*            lf_filepath; /**< path to file used for logging */
     char*            lf_linkpath; /**< path to symlink file.  */
-    char*            lf_name_prefix;
-    char*            lf_name_suffix;
+    const char*      lf_name_prefix;
+    const char*      lf_name_suffix;
     int              lf_name_seqno;
     char*            lf_full_file_name; /**< complete log file name */
     char*            lf_full_link_name; /**< complete symlink name */
@@ -206,14 +215,6 @@ struct fnames_conf
     skygw_chk_t      fn_chk_top;
 #endif
     flat_obj_state_t fn_state;
-    char*            fn_debug_prefix;
-    char*            fn_debug_suffix;
-    char*            fn_trace_prefix;
-    char*            fn_trace_suffix;
-    char*            fn_msg_prefix;
-    char*            fn_msg_suffix;
-    char*            fn_err_prefix;
-    char*            fn_err_suffix;
     char*            fn_logpath;
 #if defined(SS_DEBUG)
     skygw_chk_t      fn_chk_tail;
@@ -236,6 +237,7 @@ struct logmanager
     fnames_conf_t    lm_fnames_conf;
     logfile_t        lm_logfile;
     filewriter_t     lm_filewriter;
+    log_target_t     lm_target;
 #if defined(SS_DEBUG)
     skygw_chk_t      lm_chk_tail;
 #endif
@@ -248,7 +250,7 @@ struct logmanager
 
 typedef struct strpart
 {
-    char*           sp_string;
+    const char*     sp_string;
     struct strpart* sp_next;
 } strpart_t;
 
@@ -257,8 +259,7 @@ typedef struct strpart
 static bool logfiles_init(logmanager_t* lmgr);
 static bool logfile_init(logfile_t*     logfile,
                          logmanager_t*  logmanager,
-                         bool           store_shmem,
-                         bool           write_syslog);
+                         bool           store_shmem);
 static void logfile_done(logfile_t* logfile);
 static void logfile_free_memory(logfile_t* lf);
 static void logfile_flush(logfile_t* lf);
@@ -267,21 +268,19 @@ static bool logfile_create(logfile_t* lf);
 static bool logfile_open_file(filewriter_t* fw, logfile_t* lf);
 static char* form_full_file_name(strpart_t* parts, logfile_t* lf, int seqnoidx);
 
-static bool filewriter_init(logmanager_t*    logmanager,
-                            filewriter_t*    fw,
-                            skygw_message_t* clientmes,
-                            skygw_message_t* logmes);
+static bool filewriter_init(logmanager_t* logmanager,
+                            filewriter_t* fw);
 static void filewriter_done(filewriter_t* filewriter);
-static bool fnames_conf_init(fnames_conf_t* fn, int argc, char* argv[]);
+static bool fnames_conf_init(fnames_conf_t* fn, const char* logdir);
 static void fnames_conf_done(fnames_conf_t* fn);
 static void fnames_conf_free_memory(fnames_conf_t* fn);
-static char* fname_conf_get_prefix(fnames_conf_t* fn, logfile_id_t id);
-static char* fname_conf_get_suffix(fnames_conf_t* fn, logfile_id_t id);
 static void* thr_filewriter_fun(void* data);
 static logfile_t* logmanager_get_logfile(logmanager_t* lm);
 static bool logmanager_register(bool writep);
 static void logmanager_unregister(void);
-static bool logmanager_init_nomutex(int argc, char* argv[]);
+static bool logmanager_init_nomutex(const char* ident,
+                                    const char* logdir,
+                                    log_target_t target);
 static void logmanager_done_nomutex(void);
 static bool logmanager_is_valid_id(logfile_id_t id);
 
@@ -312,70 +311,24 @@ static int find_last_seqno(strpart_t* parts, int seqno, int seqnoidx);
 void flushall_logfiles(bool flush);
 bool thr_flushall_check();
 
-const char* get_suffix_default(void)
-{
-    return ".log";
-}
-
-const char* get_debug_prefix_default(void)
-{
-    return "debug";
-}
-
-const char* get_debug_suffix_default(void)
-{
-    return get_suffix_default();
-}
-
-const char* get_trace_prefix_default(void)
-{
-    return "trace";
-}
-
-const char* get_trace_suffix_default(void)
-{
-    return get_suffix_default();
-}
-
-const char* get_msg_prefix_default(void)
-{
-    return "messages";
-}
-
-const char* get_msg_suffix_default(void)
-{
-    return get_suffix_default();
-}
-
-const char* get_err_prefix_default(void)
-{
-    return "error";
-}
-
-const char* get_err_suffix_default(void)
-{
-    return get_suffix_default();
-}
-
-const char* get_logpath_default(void)
-{
-    return "/var/log/maxscale";
-}
-
-static bool logmanager_init_nomutex(int argc, char* argv[])
+static bool logmanager_init_nomutex(const char* ident,
+                                    const char* logdir,
+                                    log_target_t target)
 {
     fnames_conf_t* fn;
     filewriter_t*  fw;
     int            err;
-    bool           succp = false;
+    bool           succ = false;
 
     lm = (logmanager_t *)calloc(1, sizeof(logmanager_t));
 
     if (lm == NULL)
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
+
+    lm->lm_target = (target == LOG_TARGET_DEFAULT ? LOG_TARGET_FS : target);
 #if defined(SS_DEBUG)
     lm->lm_chk_top   = CHK_NUM_LOGMANAGER;
     lm->lm_chk_tail  = CHK_NUM_LOGMANAGER;
@@ -390,7 +343,7 @@ static bool logmanager_init_nomutex(int argc, char* argv[])
     if (lm->lm_clientmes == NULL || lm->lm_logmes == NULL)
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
 
     lm->lm_enabled_logfiles |= LOGFILE_ERROR;
@@ -401,24 +354,22 @@ static bool logmanager_init_nomutex(int argc, char* argv[])
     fn->fn_state  = UNINIT;
     fw->fwr_state = UNINIT;
 
-    if (!do_syslog)
-    {
-        free(syslog_id_str);
-        syslog_id_str = NULL;
-    }
+    // The openlog call is always made, but a connection to the system logger will
+    // not be made until a call to syslog is made.
+    openlog(ident, LOG_PID | LOG_ODELAY, LOG_USER);
 
     /** Initialize configuration including log file naming info */
-    if (!fnames_conf_init(fn, argc, argv))
+    if (!fnames_conf_init(fn, logdir))
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
 
     /** Initialize logfiles */
     if (!logfiles_init(lm))
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
 
     /**
@@ -430,10 +381,10 @@ static bool logmanager_init_nomutex(int argc, char* argv[])
      * Initialize filewriter data and open the log file
      * for each log file type.
      */
-    if (!filewriter_init(lm, fw, lm->lm_clientmes, lm->lm_logmes))
+    if (!filewriter_init(lm, fw))
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
 
     /** Initialize and start filewriter thread */
@@ -442,27 +393,27 @@ static bool logmanager_init_nomutex(int argc, char* argv[])
     if (fw->fwr_thread == NULL)
     {
         err = 1;
-        goto return_succp;
+        goto return_succ;
     }
 
     if ((err = skygw_thread_start(fw->fwr_thread)) != 0)
     {
-        goto return_succp;
+        goto return_succ;
     }
     /** Wait message from filewriter_thr */
     skygw_message_wait(fw->fwr_clientmes);
 
-    succp = true;
+    succ = true;
     lm->lm_enabled = true;
 
-return_succp:
+return_succ:
     if (err != 0)
     {
         /** This releases memory of all created objects */
         logmanager_done_nomutex();
         fprintf(stderr, "*\n* Error : Initializing log manager failed.\n*\n");
     }
-    return succp;
+    return succ;
 }
 
 
@@ -470,32 +421,34 @@ return_succp:
 /**
  * Initializes log managing routines in MariaDB Corporation MaxScale.
  *
- * Parameters:
- * @param argc  number of arguments in argv array
- *
- * @param argv  arguments array
+ * @param ident  The syslog ident. If NULL, then the program name is used.
+ * @param logdir The directory for the log file. If NULL logging will be made to stdout.
+ * @param target Whether the log should be written to filesystem or shared memory.
+ *               Meaningless if logdir is NULL.
  *
  * @return true if succeed, otherwise false
  *
  */
-bool skygw_logmanager_init(int argc, char* argv[])
+bool skygw_logmanager_init(const char* ident, const char* logdir, log_target_t target)
 {
-    bool succp = false;
+    bool succ = false;
 
     acquire_lock(&lmlock);
 
-    if (lm != NULL)
+    if (!lm)
     {
-        succp = true;
-        goto return_succp;
+        succ = logmanager_init_nomutex(ident, logdir, target);
+    }
+    else
+    {
+        // TODO: This is not ok. If the parameters are different then
+        // TODO: we pretend something is what it is not.
+        succ = true;
     }
 
-    succp = logmanager_init_nomutex(argc, argv);
-
-return_succp:
     release_lock(&lmlock);
 
-    return succp;
+    return succ;
 }
 
 /**
@@ -529,10 +482,8 @@ static void logmanager_done_nomutex(void)
     /** Release logfile memory */
     logfile_done(lf);
 
-    if (syslog_id_str)
-    {
-        closelog();
-    }
+    closelog();
+
     /** Release messages and finally logmanager memory */
     fnames_conf_done(&lm->lm_fnames_conf);
     skygw_message_done(lm->lm_clientmes);
@@ -562,34 +513,30 @@ void skygw_logmanager_done(void)
 {
     acquire_lock(&lmlock);
 
-    if (lm == NULL)
+    if (lm)
     {
-        release_lock(&lmlock);
-        return;
-    }
-    CHK_LOGMANAGER(lm);
-    /** Mark logmanager unavailable */
-    lm->lm_enabled = false;
+        CHK_LOGMANAGER(lm);
+        /** Mark logmanager unavailable */
+        lm->lm_enabled = false;
 
-    /** Wait until all users have left or someone shuts down
-     * logmanager between lock release and acquire.
-     */
-    while (lm != NULL && lm->lm_nlinks != 0)
-    {
-        release_lock(&lmlock);
-        pthread_yield();
-        acquire_lock(&lmlock);
+        /** Wait until all users have left or someone shuts down
+         * logmanager between lock release and acquire.
+         */
+        while (lm != NULL && lm->lm_nlinks != 0)
+        {
+            release_lock(&lmlock);
+            pthread_yield();
+            acquire_lock(&lmlock);
+        }
+
+        /** Shut down if not already shutted down. */
+        if (lm)
+        {
+            ss_dassert(lm->lm_nlinks == 0);
+            logmanager_done_nomutex();
+        }
     }
 
-    /** Logmanager was already shut down. Return successfully. */
-    if (lm == NULL)
-    {
-        goto return_void;
-    }
-    ss_dassert(lm->lm_nlinks == 0);
-    logmanager_done_nomutex();
-
-return_void:
     release_lock(&lmlock);
 }
 
@@ -674,194 +621,183 @@ static int logmanager_write_log(logfile_id_t    id,
     size_t       timestamp_len;
     int          i;
 
+    // The config parameters are copied to local variables, because the values in
+    // log_config may change during the course of the function, with would have
+    // unpleasant side-effects.
+    int highprec = log_config.highprec;
+    int do_maxscalelog = log_config.do_maxscalelog;
+    int do_syslog = log_config.do_syslog;
+
+    assert(str);
+    assert(logmanager_is_valid_id(id));
     CHK_LOGMANAGER(lm);
 
-    if (!logmanager_is_valid_id(id))
-    {
-        err = -1;
-        ss_dassert(false);
-        goto return_err;
-    }
     // All messages are now logged to the error log file.
     lf = &lm->lm_logfile;
     CHK_LOGFILE(lf);
 
+    /** Length of string that will be written, limited by bufsize */
+    size_t safe_str_len;
+    /** Length of session id */
+    size_t sesid_str_len;
+    size_t cmplen = 0;
     /**
-     * When string pointer is NULL, operation is flush.
+     * 2 braces, 2 spaces and terminating char
+     * If session id is stored to tls_log_info structure, allocate
+     * room for session id too.
      */
-    if (str == NULL)
+    if (id == LOGFILE_TRACE && tls_log_info.li_sesid != 0)
     {
-        if (flush)
-        {
-            logfile_flush(lf); /*< wakes up file writer */
-        }
+        sesid_str_len = 5 * sizeof(char) + get_decimal_len(tls_log_info.li_sesid);
     }
     else
     {
-        /** Length of string that will be written, limited by bufsize */
-        size_t safe_str_len;
-        /** Length of session id */
-        size_t sesid_str_len;
-        size_t cmplen = 0;
-        /**
-         * 2 braces, 2 spaces and terminating char
-         * If session id is stored to tls_log_info structure, allocate
-         * room for session id too.
-         */
-        if (id == LOGFILE_TRACE && tls_log_info.li_sesid != 0)
-        {
-            sesid_str_len = 5 * sizeof(char) + get_decimal_len(tls_log_info.li_sesid);
-        }
-        else
-        {
-            sesid_str_len = 0;
-        }
-        if (highprec)
-        {
-            timestamp_len = get_timestamp_len_hp();
-        }
-        else
-        {
-            timestamp_len = get_timestamp_len();
-        }
-        cmplen = sesid_str_len > 0 ? sesid_str_len - sizeof(char) : 0;
+        sesid_str_len = 0;
+    }
+    if (highprec)
+    {
+        timestamp_len = get_timestamp_len_hp();
+    }
+    else
+    {
+        timestamp_len = get_timestamp_len();
+    }
+    cmplen = sesid_str_len > 0 ? sesid_str_len - sizeof(char) : 0;
 
-        bool overflow = false;
-        /** Find out how much can be safely written with current block size */
-        if (timestamp_len - sizeof(char) + cmplen + str_len > lf->lf_buf_size)
-        {
-            safe_str_len = lf->lf_buf_size;
-            overflow = true;
-        }
-        else
-        {
-            safe_str_len = timestamp_len - sizeof(char) + cmplen + str_len;
-        }
-        /**
-         * Seek write position and register to block buffer.
-         * Then print formatted string to write position.
-         */
+    bool overflow = false;
+    /** Find out how much can be safely written with current block size */
+    if (timestamp_len - sizeof(char) + cmplen + str_len > lf->lf_buf_size)
+    {
+        safe_str_len = lf->lf_buf_size;
+        overflow = true;
+    }
+    else
+    {
+        safe_str_len = timestamp_len - sizeof(char) + cmplen + str_len;
+    }
+    /**
+     * Seek write position and register to block buffer.
+     * Then print formatted string to write position.
+     */
 
 #if defined (SS_LOG_DEBUG)
+    {
+        char *copy, *tok;
+        int tokval;
+
+        simple_mutex_lock(&msg_mutex, true);
+        copy = strdup(str);
+        tok = strtok(copy, "|");
+        tok = strtok(NULL, "|");
+
+        if (strstr(str, "message|") && tok)
         {
-            char *copy, *tok;
-            int tokval;
+            tokval = atoi(tok);
 
-            simple_mutex_lock(&msg_mutex, true);
-            copy = strdup(str);
-            tok = strtok(copy, "|");
-            tok = strtok(NULL, "|");
-
-            if (strstr(str, "message|") && tok)
+            if (prevval > 0)
             {
-                tokval = atoi(tok);
-
-                if (prevval > 0)
-                {
-                    ss_dassert(tokval == (prevval + 1));
-                }
-                prevval = tokval;
+                ss_dassert(tokval == (prevval + 1));
             }
-            free(copy);
-            simple_mutex_unlock(&msg_mutex);
+            prevval = tokval;
         }
+        free(copy);
+        simple_mutex_unlock(&msg_mutex);
+    }
 #endif
-        /** Book space for log string from buffer */
-        if (do_maxscalelog)
-        {
-            // All messages are now logged to the error log file.
-            wp = blockbuf_get_writepos(&bb, safe_str_len, flush);
-        }
-        else
-        {
-            wp = (char*)malloc(sizeof(char) * (timestamp_len - sizeof(char) + cmplen + str_len + 1));
-        }
+    /** Book space for log string from buffer */
+    if (do_maxscalelog)
+    {
+        // All messages are now logged to the error log file.
+        wp = blockbuf_get_writepos(&bb, safe_str_len, flush);
+    }
+    else
+    {
+        wp = (char*)malloc(sizeof(char) * (timestamp_len - sizeof(char) + cmplen + str_len + 1));
+    }
 
-        if (wp == NULL)
-        {
-            return -1;
-        }
+    if (wp == NULL)
+    {
+        return -1;
+    }
 
 #if defined (SS_LOG_DEBUG)
-        {
-            sprintf(wp, "[msg:%d]", atomic_add(&write_index, 1));
-            safe_str_len -= strlen(wp);
-            wp += strlen(wp);
-        }
+    {
+        sprintf(wp, "[msg:%d]", atomic_add(&write_index, 1));
+        safe_str_len -= strlen(wp);
+        wp += strlen(wp);
+    }
 #endif
+    /**
+     * Write timestamp with at most <timestamp_len> characters
+     * to wp.
+     * Returned timestamp_len doesn't include terminating null.
+     */
+    if (highprec)
+    {
+        timestamp_len = snprint_timestamp_hp(wp, timestamp_len);
+    }
+    else
+    {
+        timestamp_len = snprint_timestamp(wp, timestamp_len);
+    }
+    if (sesid_str_len != 0)
+    {
         /**
-         * Write timestamp with at most <timestamp_len> characters
-         * to wp.
-         * Returned timestamp_len doesn't include terminating null.
+         * Write session id
          */
-        if (highprec)
-        {
-            timestamp_len = snprint_timestamp_hp(wp, timestamp_len);
-        }
-        else
-        {
-            timestamp_len = snprint_timestamp(wp, timestamp_len);
-        }
-        if (sesid_str_len != 0)
-        {
-            /**
-             * Write session id
-             */
-            snprintf(wp + timestamp_len, sesid_str_len, "[%lu]  ", tls_log_info.li_sesid);
-            sesid_str_len -= 1; /*< don't calculate terminating char anymore */
-        }
-        /**
-         * Write next string to overwrite terminating null character
-         * of the timestamp string.
-         */
-        snprintf(wp + timestamp_len + sesid_str_len,
-                 safe_str_len-timestamp_len-sesid_str_len,
-                 "%s",
-                 str);
+        snprintf(wp + timestamp_len, sesid_str_len, "[%lu]  ", tls_log_info.li_sesid);
+        sesid_str_len -= 1; /*< don't calculate terminating char anymore */
+    }
+    /**
+     * Write next string to overwrite terminating null character
+     * of the timestamp string.
+     */
+    snprintf(wp + timestamp_len + sesid_str_len,
+             safe_str_len-timestamp_len-sesid_str_len,
+             "%s",
+             str);
 
-        /** Add an ellipsis to an overflowing message to signal truncation. */
-        if (overflow && safe_str_len > 4)
-        {
-            memset(wp + safe_str_len - 4, '.', 3);
-        }
-        /** write to syslog */
-        if (lf->lf_write_syslog)
-        {
-            // Strip away the timestamp and the prefix (e.g. "[Error]: ").
-            const char *message = wp + timestamp_len + prefix_len;
+    /** Add an ellipsis to an overflowing message to signal truncation. */
+    if (overflow && safe_str_len > 4)
+    {
+        memset(wp + safe_str_len - 4, '.', 3);
+    }
+    /** write to syslog */
+    if (do_syslog)
+    {
+        // Strip away the timestamp and the prefix (e.g. "[Error]: ").
+        const char *message = wp + timestamp_len + prefix_len;
 
-            switch (id)
-            {
-            case LOGFILE_ERROR:
-                syslog(LOG_ERR, "%s", message);
-                break;
-
-            case LOGFILE_MESSAGE:
-                syslog(LOG_NOTICE, "%s", message);
-                break;
-
-            default:
-                break;
-            }
-        }
-        /** remove double line feed */
-        if (wp[safe_str_len - 2] == '\n')
+        switch (id)
         {
-            wp[safe_str_len - 2] = ' ';
-        }
-        wp[safe_str_len - 1] = '\n';
+        case LOGFILE_ERROR:
+            syslog(LOG_ERR, "%s", message);
+            break;
 
-        if (do_maxscalelog)
-        {
-            blockbuf_unregister(bb);
-        }
-        else
-        {
-            free(wp);
-        }
-    } /* if (str == NULL) */
+        case LOGFILE_MESSAGE:
+            syslog(LOG_NOTICE, "%s", message);
+            break;
 
-return_err:
+        default:
+            break;
+        }
+    }
+    /** remove double line feed */
+    if (wp[safe_str_len - 2] == '\n')
+    {
+        wp[safe_str_len - 2] = ' ';
+    }
+    wp[safe_str_len - 1] = '\n';
+
+    if (do_maxscalelog)
+    {
+        blockbuf_unregister(bb);
+    }
+    else
+    {
+        free(wp);
+    }
+
     return err;
 }
 
@@ -932,7 +868,7 @@ static char* blockbuf_get_writepos(blockbuf_t** p_bb,
     mlist_node_t*  node;
     blockbuf_t*    bb;
 #if defined(SS_DEBUG)
-    bool           succp;
+    bool           succ;
 #endif
 
     CHK_LOGMANAGER(lm);
@@ -1016,8 +952,8 @@ static char* blockbuf_get_writepos(blockbuf_t** p_bb,
                     bb_list->mlist_versno += 1;
                     ss_dassert(bb_list->mlist_versno % 2 == 1);
 
-                    ss_debug(succp =) mlist_add_data_nomutex(bb_list, bb);
-                    ss_dassert(succp);
+                    ss_debug(succ =) mlist_add_data_nomutex(bb_list, bb);
+                    ss_dassert(succ);
 
                     /**
                      * Increase version to even to mark completion of update.
@@ -1117,8 +1053,8 @@ static char* blockbuf_get_writepos(blockbuf_t** p_bb,
         bb_list->mlist_versno += 1;
         ss_dassert(bb_list->mlist_versno % 2 == 1);
 
-        ss_debug(succp =) mlist_add_data_nomutex(bb_list, bb);
-        ss_dassert(succp);
+        ss_debug(succ =) mlist_add_data_nomutex(bb_list, bb);
+        ss_dassert(succ);
 
         /**
          * Increase version to even to mark completion of update.
@@ -1273,7 +1209,7 @@ static bool logfile_set_enabled(logfile_id_t id, bool val)
 
     if (logmanager_is_valid_id(id))
     {
-        if (use_stdout == 0)
+        if (log_config.use_stdout == 0)
         {
             const char *name;
 
@@ -1641,7 +1577,7 @@ int skygw_log_rotate(logfile_id_t id)
  */
 static bool logmanager_register(bool writep)
 {
-    bool succp = true;
+    bool succ = true;
 
     acquire_lock(&lmlock);
 
@@ -1655,8 +1591,8 @@ static bool logmanager_register(bool writep)
          */
         if (!writep || fatal_error)
         {
-            succp = false;
-            goto return_succp;
+            succ = false;
+            goto return_succ;
         }
 
         ss_dassert(lm == NULL || (lm != NULL && !lm->lm_enabled));
@@ -1675,23 +1611,26 @@ static bool logmanager_register(bool writep)
 
         if (lm == NULL)
         {
-            succp = logmanager_init_nomutex(0, NULL);
+            // If someone is logging before the log manager has been inited,
+            // or after the log manager has been finished, the messages are
+            // written to stdout.
+            succ = logmanager_init_nomutex(NULL, NULL, LOG_TARGET_DEFAULT);
         }
     }
     /** if logmanager existed or was succesfully restarted, increase link */
-    if (succp)
+    if (succ)
     {
         lm->lm_nlinks += 1;
     }
 
-return_succp:
+return_succ:
 
-    if (!succp)
+    if (!succ)
     {
         fatal_error = true;
     }
     release_lock(&lmlock);
-    return succp;
+    return succ;
 }
 
 /**
@@ -1722,43 +1661,17 @@ static void logmanager_unregister(void)
  * @node Initialize log file naming parameters from call arguments
  * or from default functions in cases where arguments are not provided.
  *
- * Parameters:
- * @param fn - <usage>
- *          <description>
+ * @param fn     The fnames_conf_t structure to initialize.
+ * @param logdir The directory for the log file. If NULL logging will be made to stdout.
  *
- * @param argc - <usage>
- *          <description>
- *
- * @param argv - <usage>
- *          <description>
- *
- * @return pointer to object which is either in RUN or DONE state.
- *
+ * @return True if the initialization was performed, false otherwise.
  *
  * @details Note that input parameter lenghts are checked here.
  *
  */
-static bool fnames_conf_init(fnames_conf_t* fn,
-                             int            argc,
-                             char*          argv[])
+static bool fnames_conf_init(fnames_conf_t* fn, const char* logdir)
 {
-    int            opt;
-    bool           succp = false;
-    const char*    argstr =
-        "-h - help\n"
-        "-a <debug prefix>   ............(\"skygw_debug\")\n"
-        "-b <debug suffix>   ............(\".log\")\n"
-        "-c <trace prefix>   ............(\"skygw_trace\")\n"
-        "-d <trace suffix>   ............(\".log\")\n"
-        "-e <message prefix> ............(\"skygw_msg\")\n"
-        "-f <message suffix> ............(\".log\")\n"
-        "-g <error prefix>   ............(\"skygw_err\")\n"
-        "-i <error suffix>   ............(\".log\")\n"
-        "-j <log path>       ............(\"/tmp\")\n"
-        "-l <syslog log file ids> .......(no default)\n"
-        "-m <syslog ident>   ............(argv[0])\n"
-        "-s <shmem log file ids>  .......(no default)\n"
-        "-o                       .......(write logs to stdout)\n";
+    bool succ = false;
 
     /**
      * When init_started is set, clean must be done for it.
@@ -1768,200 +1681,29 @@ static bool fnames_conf_init(fnames_conf_t* fn,
     fn->fn_chk_top  = CHK_NUM_FNAMES;
     fn->fn_chk_tail = CHK_NUM_FNAMES;
 #endif
-    optind = 1; /**<! reset getopt index */
-    while ((opt = getopt(argc, argv, "+a:b:c:d:e:f:g:h:i:j:l:m:s:o")) != -1)
+    const char* dir;
+    if (logdir)
     {
-        switch (opt)
-        {
-        case 'o':
-            use_stdout = 1;
-            break;
-        case 'a':
-            fn->fn_debug_prefix = strndup(optarg, MAX_PREFIXLEN);
-            break;
-
-        case 'b':
-            fn->fn_debug_suffix = strndup(optarg, MAX_SUFFIXLEN);
-            break;
-        case 'c':
-            fn->fn_trace_prefix = strndup(optarg, MAX_PREFIXLEN);
-            break;
-
-        case 'd':
-            fn->fn_trace_suffix = strndup(optarg, MAX_SUFFIXLEN);
-            break;
-
-        case 'e':
-            fn->fn_msg_prefix = strndup(optarg, MAX_PREFIXLEN);
-            break;
-
-        case 'f':
-            fn->fn_msg_suffix = strndup(optarg, MAX_SUFFIXLEN);
-            break;
-
-        case 'g':
-            fn->fn_err_prefix = strndup(optarg, MAX_PREFIXLEN);
-            break;
-
-        case 'i':
-            fn->fn_err_suffix = strndup(optarg, MAX_SUFFIXLEN);
-            break;
-
-        case 'j':
-            fn->fn_logpath = strndup(optarg, MAX_PATHLEN);
-            break;
-
-        case 'l':
-            /** record list of log file ids for syslogged */
-            if (do_syslog)
-            {
-                if (syslog_id_str != NULL)
-                {
-                    free (syslog_id_str);
-                }
-                syslog_id_str = optarg;
-            }
-            break;
-
-        case 'm':
-            /**
-             * Identity string for syslog printing, needs '-l'
-             * to be effective.
-             */
-            syslog_ident_str = optarg;
-            break;
-
-        case 's':
-            /** record list of log file ids for later use */
-            shmem_id_str = optarg;
-            break;
-        case 'h':
-        default:
-            fprintf(stderr, "\nSupported arguments are (default)\n%s\n", argstr);
-            goto return_conf_init;
-        } /** switch (opt) */
+        log_config.use_stdout = 0;
+        dir = logdir;
     }
-    /** If log file name is not specified in call arguments, use default. */
-    fn->fn_debug_prefix = (fn->fn_debug_prefix == NULL) ?
-        strdup(get_debug_prefix_default()) : fn->fn_debug_prefix;
-    fn->fn_debug_suffix = (fn->fn_debug_suffix == NULL) ?
-        strdup(get_debug_suffix_default()) : fn->fn_debug_suffix;
-    fn->fn_trace_prefix = (fn->fn_trace_prefix == NULL) ?
-        strdup(get_trace_prefix_default()) : fn->fn_trace_prefix;
-    fn->fn_trace_suffix = (fn->fn_trace_suffix == NULL) ?
-        strdup(get_trace_suffix_default()) : fn->fn_trace_suffix;
-    fn->fn_msg_prefix   = (fn->fn_msg_prefix == NULL) ?
-        strdup(get_msg_prefix_default()) : fn->fn_msg_prefix;
-    fn->fn_msg_suffix   = (fn->fn_msg_suffix == NULL) ?
-        strdup(get_msg_suffix_default()) : fn->fn_msg_suffix;
-    fn->fn_err_prefix   = (fn->fn_err_prefix == NULL) ?
-        strdup(get_err_prefix_default()) : fn->fn_err_prefix;
-    fn->fn_err_suffix   = (fn->fn_err_suffix == NULL) ?
-        strdup(get_err_suffix_default()) : fn->fn_err_suffix;
-    fn->fn_logpath      = (fn->fn_logpath == NULL) ?
-        strdup(get_logpath_default()) : fn->fn_logpath;
-
-    /** Set identity string for syslog if it is not set in config.*/
-    if (do_syslog)
+    else
     {
-        syslog_ident_str =
-            (syslog_ident_str == NULL ?
-             (argv == NULL ? strdup(program_invocation_short_name) : strdup(*argv)) :
-             syslog_ident_str);
+        log_config.use_stdout = 1;
+        // TODO: Re-arrange things so that fn->fn_logpath can be NULL.
+        dir = "/tmp";
     }
-    /* ss_dfprintf(stderr, "\n\n\tCommand line : ");
-       for (i = 0; i < argc; i++)
-       {
-           ss_dfprintf(stderr, "%s ", argv[i]);
-       }
-       ss_dfprintf(stderr, "\n");*/
-#if defined(NOT_USED)
-    fprintf(stderr,
-            "Error log     :\t%s/%s1%s\n"
-            "Message log   :\t%s/%s1%s\n"
-            "Trace log     :\t%s/%s1%s\n"
-            "Debug log     :\t%s/%s1%s\n\n",
-            fn->fn_logpath,
-            fn->fn_err_prefix,
-            fn->fn_err_suffix,
-            fn->fn_logpath,
-            fn->fn_msg_prefix,
-            fn->fn_msg_suffix,
-            fn->fn_logpath,
-            fn->fn_trace_prefix,
-            fn->fn_trace_suffix,
-            fn->fn_logpath,
-            fn->fn_debug_prefix,
-            fn->fn_debug_suffix);
-#endif
-    succp = true;
-    fn->fn_state = RUN;
-    CHK_FNAMES_CONF(fn);
 
-return_conf_init:
-    if (!succp)
+    fn->fn_logpath = strdup(dir);
+
+    if (fn->fn_logpath)
     {
-        fnames_conf_done(fn);
+        succ = true;
+        fn->fn_state = RUN;
+        CHK_FNAMES_CONF(fn);
     }
-    ss_dassert(fn->fn_state == RUN || fn->fn_state == DONE);
-    return succp;
-}
 
-
-static char* fname_conf_get_prefix(fnames_conf_t* fn, logfile_id_t id)
-{
-    CHK_FNAMES_CONF(fn);
-    ss_dassert(id >= LOGFILE_FIRST && id <= LOGFILE_LAST);
-
-    switch (id)
-    {
-    case LOGFILE_DEBUG:
-        return strdup(fn->fn_debug_prefix);
-        break;
-
-    case LOGFILE_TRACE:
-        return strdup(fn->fn_trace_prefix);
-        break;
-
-    case LOGFILE_MESSAGE:
-        return strdup(fn->fn_msg_prefix);
-        break;
-
-    case LOGFILE_ERROR:
-        return strdup(fn->fn_err_prefix);
-        break;
-
-    default:
-        return NULL;
-    }
-}
-
-static char* fname_conf_get_suffix(fnames_conf_t* fn, logfile_id_t id)
-{
-    CHK_FNAMES_CONF(fn);
-    ss_dassert(id >= LOGFILE_FIRST && id <= LOGFILE_LAST);
-
-    switch (id)
-    {
-    case LOGFILE_DEBUG:
-        return strdup(fn->fn_debug_suffix);
-        break;
-
-    case LOGFILE_TRACE:
-        return strdup(fn->fn_trace_suffix);
-        break;
-
-    case LOGFILE_MESSAGE:
-        return strdup(fn->fn_msg_suffix);
-        break;
-
-    case LOGFILE_ERROR:
-        return strdup(fn->fn_err_suffix);
-        break;
-
-    default:
-        return NULL;
-    }
+    return succ;
 }
 
 
@@ -1972,7 +1714,7 @@ static char* fname_conf_get_suffix(fnames_conf_t* fn, logfile_id_t id)
  * Parameters:
  * @param lm            Log manager pointer
  *
- * @return succp        true if succeed, otherwise false.
+ * @return true if succeed, otherwise false.
  *
  *
  * @details If logfile is supposed to be located to shared memory
@@ -1985,56 +1727,16 @@ static char* fname_conf_get_suffix(fnames_conf_t* fn, logfile_id_t id)
  */
 static bool logfiles_init(logmanager_t* lm)
 {
-    bool  succp = true;
-    bool  store_shmem;
-    bool  write_syslog;
+    bool store_shmem = (lm->lm_target == LOG_TARGET_SHMEM);
 
-    /** Open syslog immediately. Print pid of loggind process. */
-    if (syslog_id_str != NULL)
-    {
-        openlog(syslog_ident_str, LOG_PID | LOG_NDELAY, LOG_USER);
-    }
-    /**
-     * Initialize log file, pass softlink flag if necessary.
-     */
+    bool succ = logfile_init(&lm->lm_logfile, lm, store_shmem);
 
-    /**
-     * Check if the file is stored in shared memory. If so,
-     * a symbolic link will be created to log directory.
-     */
-    if (shmem_id_str != NULL &&
-        strcasestr(shmem_id_str, STRLOGID(LOGFILE_ERROR)) != NULL)
-    {
-        store_shmem = true;
-    }
-    else
-    {
-        store_shmem = false;
-    }
-    /**
-     * Check if file is also written to syslog.
-     */
-    if (syslog_id_str != NULL &&
-        strcasestr(syslog_id_str, STRLOGID(LOGFILE_ERROR)) != NULL)
-    {
-        write_syslog = true;
-    }
-    else
-    {
-        write_syslog = false;
-    }
-
-    succp = logfile_init(&lm->lm_logfile,
-                         lm,
-                         store_shmem,
-                         write_syslog);
-
-    if (!succp)
+    if (!succ)
     {
         fprintf(stderr, "*\n* Error : Initializing log files failed.\n");
     }
 
-    return succp;
+    return succ;
 }
 
 static void logfile_flush(logfile_t* lf)
@@ -2080,9 +1782,17 @@ static bool logfile_create(logfile_t* lf)
     bool nameconflicts;
     bool store_shmem;
     bool writable;
-    bool succp;
+    bool succ;
     strpart_t spart[3]; /*< string parts of which the file is composed of */
 
+    if (log_config.use_stdout)
+    {
+        // TODO: Refactor so that lf_full_file_name can be NULL in this case.
+        lf->lf_full_file_name = strdup("stdout");
+        succ = true;
+        // TODO: Refactor to get rid of the gotos.
+        goto return_succ;
+    }
     /**
      * sparts is an array but next pointers are used to walk through
      * the list of string parts.
@@ -2148,8 +1858,8 @@ static bool logfile_create(logfile_t* lf)
              */
             if (!writable)
             {
-                succp = false;
-                goto return_succp;
+                succ = false;
+                goto return_succ;
             }
         }
 
@@ -2171,8 +1881,8 @@ static bool logfile_create(logfile_t* lf)
                  */
                 if (!writable)
                 {
-                    succp = false;
-                    goto return_succp;
+                    succ = false;
+                    goto return_succ;
                 }
             }
         }
@@ -2195,10 +1905,10 @@ static bool logfile_create(logfile_t* lf)
     }
     while (namecreatefail || nameconflicts);
 
-    succp = true;
+    succ = true;
 
-return_succp:
-    return succp;
+return_succ:
+    return succ;
 }
 
 /**
@@ -2217,7 +1927,7 @@ static bool logfile_open_file(filewriter_t* fw, logfile_t* lf)
 {
     bool rv = true;
 
-    if (use_stdout)
+    if (log_config.use_stdout)
     {
         fw->fwr_file = skygw_file_alloc(lf->lf_full_file_name);
         fw->fwr_file->sf_file = stdout;
@@ -2272,7 +1982,7 @@ static char* form_full_file_name(strpart_t* parts, logfile_t* lf, int seqnoidx)
     {
         int   file_sn;
         int   link_sn = 0;
-        char* tmp = parts[0].sp_string;
+        const char* tmp = parts[0].sp_string;
 
         file_sn = find_last_seqno(parts, lf->lf_name_seqno, seqnoidx);
 
@@ -2481,7 +2191,7 @@ static bool check_file_and_path(char* filename, bool* writable, bool do_log)
 static bool file_is_symlink(char* filename)
 {
     int  rc;
-    bool succp = false;
+    bool succ = false;
     struct stat b;
 
     if (filename != NULL)
@@ -2490,10 +2200,10 @@ static bool file_is_symlink(char* filename)
 
         if (rc != -1 && S_ISLNK(b.st_mode))
         {
-            succp = true;
+            succ = true;
         }
     }
-    return succp;
+    return succ;
 }
 
 
@@ -2506,16 +2216,14 @@ static bool file_is_symlink(char* filename)
  * @param logfile       log file
  * @param logmanager    log manager pointer
  * @param store_shmem   flag to indicate whether log is physically written to shmem
- * @param write_syslog  flag to indicate whether log is also written to syslog
  *
  * @return true if succeed, false otherwise
  */
 static bool logfile_init(logfile_t*    logfile,
                          logmanager_t* logmanager,
-                         bool          store_shmem,
-                         bool          write_syslog)
+                         bool          store_shmem)
 {
-    bool           succp = false;
+    bool           succ = false;
     fnames_conf_t* fn = &logmanager->lm_fnames_conf;
     logfile->lf_state = INIT;
 #if defined(SS_DEBUG)
@@ -2523,8 +2231,8 @@ static bool logfile_init(logfile_t*    logfile,
     logfile->lf_chk_tail = CHK_NUM_LOGFILE;
 #endif
     logfile->lf_logmes = logmanager->lm_logmes;
-    logfile->lf_name_prefix = fname_conf_get_prefix(fn, LOGFILE_ERROR);
-    logfile->lf_name_suffix = fname_conf_get_suffix(fn, LOGFILE_ERROR);
+    logfile->lf_name_prefix = LOGFILE_NAME_PREFIX;
+    logfile->lf_name_suffix = LOGFILE_NAME_SUFFIX;
     logfile->lf_npending_writes = 0;
     logfile->lf_name_seqno = 1;
     logfile->lf_lmgr = logmanager;
@@ -2532,7 +2240,6 @@ static bool logfile_init(logfile_t*    logfile,
     logfile->lf_rotateflag = false;
     logfile->lf_spinlock = 0;
     logfile->lf_store_shmem = store_shmem;
-    logfile->lf_write_syslog = write_syslog;
     logfile->lf_buf_size = MAX_LOGSTRLEN;
     /**
      * If file is stored in shared memory in /dev/shm, a link
@@ -2551,8 +2258,8 @@ static bool logfile_init(logfile_t*    logfile,
 
         if (c == NULL)
         {
-            succp = false;
-            goto return_with_succp;
+            succ = false;
+            goto return_with_succ;
         }
         sprintf(c, "%smaxscale.%d", shm_pathname_prefix, pid);
         logfile->lf_filepath = c;
@@ -2560,8 +2267,8 @@ static bool logfile_init(logfile_t*    logfile,
         if (mkdir(c, S_IRWXU | S_IRWXG) != 0 &&
             errno != EEXIST)
         {
-            succp = false;
-            goto return_with_succp;
+            succ = false;
+            goto return_with_succ;
         }
         logfile->lf_linkpath = strdup(fn->fn_logpath);
         logfile->lf_linkpath = add_slash(logfile->lf_linkpath);
@@ -2572,9 +2279,9 @@ static bool logfile_init(logfile_t*    logfile,
     }
     logfile->lf_filepath = add_slash(logfile->lf_filepath);
 
-    if (!(succp = logfile_create(logfile)))
+    if (!(succ = logfile_create(logfile)))
     {
-        goto return_with_succp;
+        goto return_with_succ;
     }
     /**
      * Create a block buffer list for log file. Clients' writes go to buffers
@@ -2590,35 +2297,35 @@ static bool logfile_init(logfile_t*    logfile,
                     "*\n* Error : Initializing buffers for log files "
                     "failed.");
         logfile_free_memory(logfile);
-        goto return_with_succp;
+        goto return_with_succ;
     }
 
 #if defined(SS_DEBUG)
-    if (store_shmem && !use_stdout)
+    if (store_shmem && !log_config.use_stdout)
     {
         fprintf(stderr, "%s\t: %s->%s\n",
                 STRLOGNAME(LOGFILE_ERROR),
                 logfile->lf_full_link_name,
                 logfile->lf_full_file_name);
     }
-    else if (!use_stdout)
+    else if (!log_config.use_stdout)
     {
         fprintf(stderr, "%s\t: %s\n",
                 STRLOGNAME(LOGFILE_ERROR),
                 logfile->lf_full_file_name);
     }
 #endif
-    succp = true;
+    succ = true;
     logfile->lf_state = RUN;
     CHK_LOGFILE(logfile);
 
-return_with_succp:
-    if (!succp)
+return_with_succ:
+    if (!succ)
     {
         logfile_done(logfile);
     }
     ss_dassert(logfile->lf_state == RUN || logfile->lf_state == DONE);
-    return succp;
+    return succ;
 }
 
 /**
@@ -2664,13 +2371,10 @@ static void logfile_done(logfile_t* lf)
     }
 }
 
-static void logfile_free_memory(
-    logfile_t* lf)
+static void logfile_free_memory(logfile_t* lf)
 {
     if (lf->lf_filepath != NULL)       free(lf->lf_filepath);
     if (lf->lf_linkpath != NULL)       free(lf->lf_linkpath);
-    if (lf->lf_name_prefix != NULL)    free(lf->lf_name_prefix);
-    if (lf->lf_name_suffix != NULL)    free(lf->lf_name_suffix);
     if (lf->lf_full_link_name != NULL) free(lf->lf_full_link_name);
     if (lf->lf_full_file_name != NULL) free(lf->lf_full_file_name);
 }
@@ -2678,23 +2382,19 @@ static void logfile_free_memory(
 /**
  * @node Initialize filewriter data and open the log file for each log file type.
  *
- * @param logmanager    Log manager struct
- * @param fw            File writer struct
- * @param clientmes     Messaging from file writer to log manager
- * @param logmes        Messaging from loggers to file writer thread
+ * @param logmanager Log manager struct
+ * @param fw         File writer struct
  *
  * @return true if succeed, false if failed
  *
  */
-static bool filewriter_init(logmanager_t*    logmanager,
-                            filewriter_t*    fw,
-                            skygw_message_t* clientmes,
-                            skygw_message_t* logmes)
+static bool filewriter_init(logmanager_t* logmanager, filewriter_t* fw)
 {
-    bool         succp = false;
-    logfile_t*   lf;
+    bool succ = false;
 
     CHK_LOGMANAGER(logmanager);
+    assert(logmanager->lm_clientmes);
+    assert(logmanager->lm_logmes);
 
     fw->fwr_state = INIT;
 #if defined(SS_DEBUG)
@@ -2703,36 +2403,29 @@ static bool filewriter_init(logmanager_t*    logmanager,
 #endif
     fw->fwr_logmgr = logmanager;
     /** Message from filewriter to clients */
-    fw->fwr_logmes = logmes;
+    fw->fwr_logmes = logmanager->lm_logmes;
     /** Message from clients to filewriter */
-    fw->fwr_clientmes = clientmes;
+    fw->fwr_clientmes = logmanager->lm_clientmes;
 
-    if (fw->fwr_logmes == NULL || fw->fwr_clientmes == NULL)
+    logfile_t* lf = logmanager_get_logfile(logmanager);
+
+    if (logfile_open_file(fw, lf))
     {
-        goto return_succp;
+        fw->fwr_state = RUN;
+        CHK_FILEWRITER(fw);
+        succ = true;
     }
-
-    lf = logmanager_get_logfile(logmanager);
-
-    if (!(succp = logfile_open_file(fw, lf)))
+    else
     {
         fprintf(stderr,
                 "Error : opening log file %s failed. Exiting "
                 "MaxScale\n",
                 lf->lf_full_file_name);
-        goto return_succp;
-    }
-    fw->fwr_state = RUN;
-    CHK_FILEWRITER(fw);
-    succp = true;
-
-return_succp:
-    if (!succp)
-    {
         filewriter_done(fw);
     }
+
     ss_dassert(fw->fwr_state == RUN || fw->fwr_state == DONE);
-    return succp;
+    return succ;
 }
 
 static void filewriter_done(filewriter_t* fw)
@@ -2744,7 +2437,7 @@ static void filewriter_done(filewriter_t* fw)
     case INIT:
         fw->fwr_logmes = NULL;
         fw->fwr_clientmes = NULL;
-        if (use_stdout)
+        if (log_config.use_stdout)
         {
             skygw_file_free(fw->fwr_file);
         }
@@ -2784,19 +2477,19 @@ static bool thr_flush_file(logmanager_t *lm, filewriter_t *fwr)
      */
     if (rotate_logfile)
     {
-        bool succp;
+        bool succ;
 
         lf->lf_name_seqno += 1; /*< new sequence number */
 
-        if (!(succp = logfile_create(lf)))
+        if (!(succ = logfile_create(lf)))
         {
             lf->lf_name_seqno -= 1; /*< restore */
         }
-        else if ((succp = logfile_open_file(fwr, lf)))
+        else if ((succ = logfile_open_file(fwr, lf)))
         {
-            if (use_stdout)
+            if (log_config.use_stdout)
             {
-                skygw_file_free (file);
+                skygw_file_free(file);
             }
             else
             {
@@ -2804,7 +2497,7 @@ static bool thr_flush_file(logmanager_t *lm, filewriter_t *fwr)
             }
         }
 
-        if (!succp)
+        if (!succ)
         {
             LOGIF(LE, (skygw_log_write(
                            LOGFILE_ERROR,
@@ -3038,15 +2731,7 @@ static void fnames_conf_done(fnames_conf_t* fn)
 
 static void fnames_conf_free_memory(fnames_conf_t* fn)
 {
-    if (fn->fn_debug_prefix != NULL) free(fn->fn_debug_prefix);
-    if (fn->fn_debug_suffix!= NULL)  free(fn->fn_debug_suffix);
-    if (fn->fn_trace_prefix != NULL) free(fn->fn_trace_prefix);
-    if (fn->fn_trace_suffix!= NULL)  free(fn->fn_trace_suffix);
-    if (fn->fn_msg_prefix != NULL)   free(fn->fn_msg_prefix);
-    if (fn->fn_msg_suffix != NULL)   free(fn->fn_msg_suffix);
-    if (fn->fn_err_prefix != NULL)   free(fn->fn_err_prefix);
-    if (fn->fn_err_suffix != NULL)   free(fn->fn_err_suffix);
-    if (fn->fn_logpath != NULL)      free(fn->fn_logpath);
+    free(fn->fn_logpath);
 }
 
 /**
@@ -3134,7 +2819,7 @@ void flushall_logfiles(bool flush)
  */
 void skygw_log_sync_all(void)
 {
-    if (!use_stdout)
+    if (!log_config.use_stdout)
     {
         skygw_log_write(LOGFILE_TRACE,"Starting log flushing to disk.");
     }
@@ -3155,7 +2840,7 @@ void skygw_log_sync_all(void)
  */
 void skygw_set_highp(int val)
 {
-    highprec = val;
+    log_config.highprec = !!val;
 }
 
 
@@ -3165,7 +2850,7 @@ void skygw_set_highp(int val)
  */
 void logmanager_enable_syslog(int val)
 {
-    do_syslog = val;
+    log_config.do_syslog = !!val;
 }
 
 /**
@@ -3174,5 +2859,144 @@ void logmanager_enable_syslog(int val)
  */
 void logmanager_enable_maxscalelog(int val)
 {
-    do_maxscalelog = val;
+    log_config.do_maxscalelog = !!val;
+}
+
+
+/**
+ * Explicitly ensure that all pending log messages are flushed.
+ *
+ * @return 0 if the flushing was successfully initiated, otherwise -1.
+ *
+ * Note that the return value only indicates whether the flushing was
+ * successfully initiated, not whether the actual flushing has been
+ * performed.
+ */
+int mxs_log_flush()
+{
+    return skygw_log_flush(LOGFILE_ERROR);
+}
+
+/**
+ * Rotate the log-file. That is, close the current one and create a new one
+ * with a larger sequence number.
+ *
+ * @return 0 if the rotating was successfully initiated, otherwise -1.
+ *
+ * Note that the return value only indicates whether the rotating was
+ * successfully initiated, not whether the actual rotation has been
+ * performed.
+ */
+int mxs_log_rotate()
+{
+    return skygw_log_rotate(LOGFILE_ERROR);
+}
+
+static bool convert_priority_to_file(int priority, logfile_id_t* idp, const char** textp)
+{
+    bool converted = true;
+
+    *idp = (logfile_id_t) -1;
+    *textp = NULL;
+
+    switch (priority)
+    {
+    case LOG_DEBUG:
+        *idp = LOGFILE_DEBUG;
+        break;
+    case LOG_INFO:
+        *idp = LOGFILE_TRACE;
+        break;
+    case LOG_NOTICE:
+        *idp = LOGFILE_MESSAGE;
+        break;
+    case LOG_ERR:
+        *idp = LOGFILE_ERROR;
+        break;
+    case LOG_WARNING:
+        *textp = "LOG_WARNING";
+        break;
+    case LOG_CRIT:
+        *textp = "LOG_CRIT";
+        break;
+    case LOG_ALERT:
+        *textp = "LOG_ALERT";
+        break;
+    case LOG_EMERG:
+        *textp = "LOG_EMERG";
+        break;
+    default:
+        converted = false;
+    }
+
+    return converted;
+}
+
+/**
+ * Enable a particular syslog priority.
+ *
+ * @param priority One of the LOG_ERR etc. constants from sys/syslog.h.
+ * @return 0 if the priority was valid, -1 otherwise.
+ */
+int mxs_log_enable_priority(int priority)
+{
+    int rv = -1;
+    logfile_id_t id;
+    const char* text;
+
+    if (convert_priority_to_file(priority, &id, &text))
+    {
+        if (!text)
+        {
+            rv = skygw_log_enable(id);
+        }
+        else
+        {
+            // TODO: Change to warning when available.
+            MXS_DEBUG("Attempt to enable syslog priority %s, which is not available yet.", text);
+            rv = 0;
+        }
+    }
+    else
+    {
+        MXS_ERROR("Attempt to enable unknown syslog priority: %d", priority);
+    }
+
+    return rv;
+}
+
+/**
+ * Disable a particular syslog priority.
+ *
+ * @param priority One of the LOG_ERR etc. constants from sys/syslog.h.
+ *
+ * Note that there is no hierarchy. That is, disabling a priority of
+ * high importance, such as LOG_ERR, does not automatically disable
+ * all lower prioritys.
+ */
+int mxs_log_disable_priority(int priority)
+{
+    int rv = -1;
+    logfile_id_t id;
+    const char* text;
+
+    if (convert_priority_to_file(priority, &id, &text))
+    {
+        if (!text)
+        {
+            rv = skygw_log_disable(id);
+        }
+        else
+        {
+            // TODO: Change to warning when available.
+            MXS_DEBUG("Attempt to enable syslog priority %s, which is not available.", text);
+            rv = 0;
+        }
+    }
+    else
+    {
+        MXS_ERROR("Attempt to enable unknown syslog priority: %d", priority);
+    }
+
+    return rv;
 }

@@ -63,9 +63,6 @@
 #include <version.h>
 #include <gwdirs.h>
 
-extern int lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
 extern int blr_read_events_all_events(ROUTER_INSTANCE *router, int fix, int debug);
 extern uint32_t extract_field(uint8_t *src, int bits);
 static void printVersion(const char *progname);
@@ -89,8 +86,6 @@ return 1;
 }
 
 int main(int argc, char **argv) {
-	char** arg_vector;
-	int arg_count = 4;
 	ROUTER_INSTANCE *inst;
 	int fd;
 	int ret;
@@ -129,24 +124,9 @@ int main(int argc, char **argv) {
 
 	num_args = optind;
 
-	arg_vector = malloc(sizeof(char*)*(arg_count + 1));
-
-	if(arg_vector == NULL)
-	{
-		fprintf(stderr,"Error: Memory allocation failed for log manager arg_vector.\n");
-		return 1;
-	}
-
-	arg_vector[0] = "logmanager";
-	arg_vector[1] = "-j";
-	arg_vector[2] = "/tmp/maxbinlogcheck";
-	arg_vector[3] = "-o";
-	arg_vector[4] = NULL;
-	skygw_logmanager_init(arg_count,arg_vector);
+	skygw_logmanager_init(NULL, NULL, LOG_TARGET_DEFAULT);
 
 	skygw_log_set_augmentation(0);
-
-	free(arg_vector);
 
 	if (!debug_out)
 		skygw_log_disable(LOGFILE_DEBUG);

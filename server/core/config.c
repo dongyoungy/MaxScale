@@ -82,11 +82,6 @@
 /** According to the PCRE manual, this should be a multiple of 3 */
 #define MAXSCALE_PCRE_BUFSZ 24
 
-/** Defined in log_manager.cc */
-extern int            lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
-
 extern int setipaddress(struct in_addr *, char *);
 static	int	process_config_context(CONFIG_CONTEXT	*);
 static	int	process_config_update(CONFIG_CONTEXT *);
@@ -348,6 +343,12 @@ int		rval, ini_rval;
 	rval = process_config_context(config.next);
 	free_config_context(config.next);
 
+    /** Start all monitors */
+    if(rval)
+    {
+        monitorStartAll();
+    }
+
 	return rval;
 }
 
@@ -498,6 +499,13 @@ process_config_context(CONFIG_CONTEXT *context)
 						     subservices,
 						     1,STRING_TYPE);
 				}
+                char *log_auth_warnings = config_get_value(obj->parameters,
+                                                           "log_auth_warnings");
+                int truthval;
+                if (log_auth_warnings && (truthval = config_truth_value(log_auth_warnings)) != -1)
+                {
+                    ((SERVICE*) obj->element)->log_auth_warnings = (bool) truthval;
+                }
 
                 CONFIG_PARAMETER* param;
                 if((param = config_get_param(obj->parameters, "ignore_databases")))
@@ -1154,7 +1162,7 @@ process_config_context(CONFIG_CONTEXT *context)
 						gateway.id = getpid();
 					}
 
-					monitorStart(obj->element,obj->parameters);
+                    monitorAddParameters(obj->element, obj->parameters);
 
 					/* set monitor interval */
 					if (interval > 0)
@@ -1251,6 +1259,7 @@ process_config_context(CONFIG_CONTEXT *context)
 
 		obj = obj->next;
 	} /*< while */
+
 	/** TODO: consistency check function */
 
 	hashtable_free(monitorhash);
@@ -1459,6 +1468,22 @@ return_p2:
 }
 
 /**
+ * Free a configuration parameter
+ * @param p1 Parameter to free
+ */
+void free_config_parameter(CONFIG_PARAMETER* p1)
+{
+    while (p1)
+    {
+        free(p1->name);
+        free(p1->value);
+        CONFIG_PARAMETER* p2 = p1->next;
+        free(p1);
+        p1 = p2;
+    }
+}
+
+/**
  * Free a config tree
  *
  * @param context	The configuration data
@@ -1472,15 +1497,7 @@ CONFIG_PARAMETER	*p1, *p2;
 	while (context)
 	{
 		free(context->object);
-		p1 = context->parameters;
-		while (p1)
-		{
-			free(p1->name);
-			free(p1->value);
-			p2 = p1->next;
-			free(p1);
-			p1 = p2;
-		}
+		free_config_parameter(context->parameters);
 		obj = context->next;
 		free(context);
 		context = obj;
@@ -1780,6 +1797,14 @@ SERVER			*server;
 					strip_db_esc = config_get_value(obj->parameters, "strip_db_esc");
 					version_string = config_get_value(obj->parameters, "version_string");
 					allow_localhost_match_wildcard_host = config_get_value(obj->parameters, "localhost_match_wildcard_host");
+
+                    char *log_auth_warnings = config_get_value(obj->parameters,
+                                                               "log_auth_warnings");
+                    int truthval;
+                    if (log_auth_warnings && (truthval = config_truth_value(log_auth_warnings)) != -1)
+                    {
+                        service->log_auth_warnings = (bool)truthval;
+                    }
 
                     CONFIG_PARAMETER* param;
 
@@ -2199,6 +2224,7 @@ static char *service_params[] =
 		"ssl_cert_verify_depth",
         "ignore_databases",
         "ignore_databases_regex",
+        "log_auth_warnings",
                 NULL
         };
 

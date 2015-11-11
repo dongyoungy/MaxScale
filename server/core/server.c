@@ -48,11 +48,6 @@
 #include <skygw_utils.h>
 #include <log_manager.h>
 
-/** Defined in log_manager.cc */
-extern int            lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
-
 static SPINLOCK	server_spin = SPINLOCK_INIT;
 static SERVER	*allServers = NULL;
 
@@ -87,6 +82,7 @@ SERVER 	*server;
 	server->rlag = -2;
 	server->master_id = -1;
 	server->depth = -1;
+	spinlock_init(&server->lock);
         server->persistent = NULL;
         server->persistmax = 0;
         spinlock_init(&server->persistlock);
@@ -668,6 +664,7 @@ char	*status = NULL;
 void
 server_set_status(SERVER *server, int bit)
 {
+	spinlock_acquire(&server->lock);
 	server->status |= bit;
 	
 	/** clear error logged flag before the next failure */
@@ -675,6 +672,7 @@ server_set_status(SERVER *server, int bit)
 	{
 		server->master_err_is_logged = false;
 	}
+	spinlock_release(&server->lock);
 }
 
 /**
@@ -686,7 +684,9 @@ server_set_status(SERVER *server, int bit)
 void
 server_clear_status(SERVER *server, int bit)
 {
+	spinlock_acquire(&server->lock);
 	server->status &= ~bit;
+	spinlock_release(&server->lock);
 }
 
 /**
@@ -912,3 +912,33 @@ server_update_port(SERVER *server, unsigned short port)
 	spinlock_release(&server_spin);
 }
 
+static struct {
+	char		*str;
+	unsigned int	bit;
+} ServerBits[] = {
+	{ "running", 		SERVER_RUNNING },
+	{ "master",		SERVER_MASTER },
+	{ "slave",		SERVER_SLAVE },
+	{ "synced",		SERVER_JOINED },
+	{ "ndb",		SERVER_NDB },
+	{ "maintenance",	SERVER_MAINT },
+	{ "maint",		SERVER_MAINT },
+	{ NULL,			0 }
+};
+
+/**
+ * Map the server status bit
+ *
+ * @param str	String representation
+ * @return bit value or 0 on error
+ */
+unsigned int
+server_map_status(char *str)
+{
+int i;
+
+	for (i = 0; ServerBits[i].str; i++)
+		if (!strcasecmp(str, ServerBits[i].str))
+			return ServerBits[i].bit;
+	return 0;
+}

@@ -75,10 +75,6 @@
 #include <ini.h>
 #include <sys/stat.h>
 
-extern int lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
-
 static char *version_str = "V2.0.0";
 
 /* The router entry points */
@@ -583,6 +579,7 @@ char		task_name[BLRM_TASK_NAME_LEN+1] = "";
 				inst->service->name)));
 			if (service->users) {
 				users_free(service->users);
+                service->users = NULL;
 			}
 
 			free(inst);
@@ -661,6 +658,7 @@ char		task_name[BLRM_TASK_NAME_LEN+1] = "";
 
 			if (service->users) {
 				users_free(service->users);
+                service->users = NULL;
 			}
 
 			if (service->dbref && service->dbref->server) {

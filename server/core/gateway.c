@@ -101,16 +101,6 @@ time_t  MaxScaleStarted;
 extern char *program_invocation_name;
 extern char *program_invocation_short_name;
 
-/**
- * Variable holding the enabled logfiles information.
- * Used from log users to check enabled logs prior calling
- * actual library calls such as skygw_log_write.
- */
-/** Defined in log_manager.cc */
-extern int            lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
-
 /*
  * Server options are passed to the mysql_server_init. Each gateway must have a unique
  * data directory that is passed to the mysql_server_init, therefore the data directory
@@ -1087,7 +1077,7 @@ int main(int argc, char **argv)
     char*    tmp_path;
     char*    tmp_var;
     int      option_index;
-    int      logtofile = 0;               /* Use shared memory or file */
+    log_target_t log_target = LOG_TARGET_FS;
     int      *syslog_enabled = &config_get_global_options()->syslog; /** Log to syslog */
     int      *maxscalelog_enabled = &config_get_global_options()->maxlog; /** Log with MaxScale */
     ssize_t  log_flush_timeout_ms = 0;
@@ -1099,7 +1089,7 @@ int main(int argc, char **argv)
                                    write_footer,
                                    NULL};
 
-    *syslog_enabled = 0;
+    *syslog_enabled = 1;
     *maxscalelog_enabled = 1;
 
     sigemptyset(&sigpipe_mask);
@@ -1179,9 +1169,9 @@ int main(int argc, char **argv)
 
         case 'l':
             if (strncasecmp(optarg, "file", PATH_MAX) == 0)
-                logtofile = 1;
+                log_target = LOG_TARGET_FS;
             else if (strncasecmp(optarg, "shm", PATH_MAX) == 0)
-                logtofile = 0;
+                log_target = LOG_TARGET_SHMEM;
             else
             {
                 char* logerr = "Configuration file argument "
@@ -1708,13 +1698,8 @@ int main(int argc, char **argv)
 
     /**
      * Init Log Manager for MaxScale.
-     * The skygw_logmanager_init expects to take arguments as passed to main
-     * and proesses them with getopt, therefore we need to give it a dummy
-     * argv[0]
      */
     {
-        char buf[1024];
-        char *argv[8];
         bool succp;
 
         if (mkdir(get_logdir(), 0777) != 0 && errno != EEXIST)
@@ -1724,10 +1709,6 @@ int main(int argc, char **argv)
                     default_logdir);
             goto return_main;
         }
-
-        argv[0] = "MaxScale";
-        argv[1] = "-j";
-        argv[2] = get_logdir();
 
         if (!(*syslog_enabled))
         {
@@ -1741,24 +1722,7 @@ int main(int argc, char **argv)
         logmanager_enable_syslog(*syslog_enabled);
         logmanager_enable_maxscalelog(*maxscalelog_enabled);
 
-        if (logtofile)
-        {
-            argv[3] = "-l"; /*< write to syslog */
-            /** Logs that should be syslogged */
-            argv[4] = "LOGFILE_MESSAGE,LOGFILE_ERROR"
-                "LOGFILE_DEBUG,LOGFILE_TRACE";
-            argv[5] = NULL;
-            succp = skygw_logmanager_init(5, argv);
-        }
-        else
-        {
-            argv[3] = "-s"; /*< store to shared memory */
-            argv[4] = "LOGFILE_DEBUG,LOGFILE_TRACE"; /*< to shm */
-            argv[5] = "-l"; /*< write to syslog */
-            argv[6] = "LOGFILE_MESSAGE,LOGFILE_ERROR"; /*< to syslog */
-            argv[7] = NULL;
-            succp = skygw_logmanager_init(7, argv);
-        }
+        succp = skygw_logmanager_init(NULL, get_logdir(), log_target);
 
         if (!succp)
         {

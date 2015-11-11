@@ -66,11 +66,6 @@
 #include <gwdirs.h>
 #include <math.h>
 
-/** Defined in log_manager.cc */
-extern int            lm_enabled_logfiles_bitmask;
-extern size_t         log_ses_count[];
-extern __thread log_info_t tls_log_info;
-
 static RSA *rsa_512 = NULL;
 static RSA *rsa_1024 = NULL;
 
@@ -149,6 +144,7 @@ SERVICE 	*service;
 	service->ssl_ca_cert = NULL;
 	service->ssl_cert = NULL;
 	service->ssl_key = NULL;
+	service->log_auth_warnings = true;
 	service->ssl_cert_verify_depth = DEFAULT_SSL_CERT_VERIFY_DEPTH;
 	/** Support the highest possible SSL/TLS methods available as the default */
 	service->ssl_method_type = SERVICE_SSL_TLS_MAX;
@@ -352,6 +348,7 @@ GWPROTOCOL	*funcs;
 	{
 		users_free(service->users);
 		dcb_close(port->listener);
+        service->users = NULL;
 		port->listener = NULL;
 		LOGIF(LE, (skygw_log_write_flush(
                         LOGFILE_ERROR,
@@ -386,8 +383,9 @@ GWPROTOCOL	*funcs;
 				service->name)));
 			
 			users_free(service->users);
-                        dcb_close(port->listener);
+            dcb_close(port->listener);
 			port->listener = NULL;
+            service->users = NULL;
 			goto retblock;
                 }
         } 
@@ -400,6 +398,7 @@ GWPROTOCOL	*funcs;
                         port->protocol,
                         service->name)));
 		users_free(service->users);
+        service->users = NULL;
 		dcb_close(port->listener);
 		port->listener = NULL;
         }
