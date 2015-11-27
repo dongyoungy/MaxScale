@@ -18,6 +18,10 @@ add_library(qlafilter SHARED qlafilter.c)
 target_link_libraries(qlafilter log_manager utils)
 install(TARGETS qlafilter DESTINATION ${MAXSCALE_LIBDIR})
 
+add_library(dbsfilter SHARED dbsfilter.c)
+target_link_libraries(dbsfilter log_manager utils)
+install(TARGETS dbsfilter DESTINATION ${MAXSCALE_LIBDIR})
+
 add_library(tee SHARED tee.c)
 target_link_libraries(tee log_manager utils)
 install(TARGETS tee DESTINATION ${MAXSCALE_LIBDIR})
