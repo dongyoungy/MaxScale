@@ -35,8 +35,6 @@
 #include <regex.h>
 #include <atomic.h>
 
-#define MAX_SESSIONS 1024
-
 /** Defined in log_manager.cc */
 extern int            lm_enabled_logfiles_bitmask;
 extern size_t         log_ses_count[];
@@ -81,18 +79,12 @@ static FILTER_OBJECT MyObject = {
  */
 typedef struct {
 	int	sessions;	/* Session count */
-	char	*filename;	/* filename */
 	char	*source;	/* The source of the client connection */
-	char	*user;		/* A user name to filter on */
+	char	*user;	/* The user name to filter on */
+	char	*filename;	/* filename */
+
 	FILE* fp;
 } DBS_INSTANCE;
-
-/*typedef struct {*/
-	/*unsigned long duration;*/
-	/*char* sql;*/
-/*} DBSQ;*/
-
-/*static DBSQ queries[MAX_SESSIONS];*/
 
 /**
  * The session structure for this DBS filter.
@@ -106,12 +98,9 @@ typedef struct {
 	DOWNSTREAM	down;
 	UPSTREAM	up;
 	int		active;
-	int		id;
 	char		*clientHost;
 	char		*userName;
-	char		*filename;
 	char* sql;
-	unsigned long duration;
 	struct timeval	start;
 	char		*current;
 	int		n_statements;
@@ -173,6 +162,8 @@ DBS_INSTANCE	*my_instance;
 	{
 		my_instance->source = NULL;
 		my_instance->user = NULL;
+
+		/* set default log filename */
 		my_instance->filename = strdup("dbseer_query.log");
 		for (i = 0; params && params[i]; i++)
 		{
@@ -211,19 +202,9 @@ char		*remote, *user;
 
 	if ((my_session = calloc(1, sizeof(DBS_SESSION))) != NULL)
 	{
-		if ((my_session->filename =
-			(char *)malloc(strlen(my_instance->filename) + 20))
-						== NULL)
-		{
-			free(my_session);
-			return NULL;
-		}
-		sprintf(my_session->filename, "%s", my_instance->filename);
-		my_session->id = my_instance->sessions;
 		atomic_add(&my_instance->sessions,1);
 
 		my_session->sql = NULL;
-		my_session->duration = 0;
 		my_session->n_statements = 0;
 		my_session->total.tv_sec = 0;
 		my_session->total.tv_usec = 0;
@@ -243,8 +224,6 @@ char		*remote, *user;
 		if (my_instance->user && my_session->userName && strcmp(my_session->userName,
 							my_instance->user))
 			my_session->active = 0;
-
-		sprintf(my_session->filename, "%s", my_instance->filename);
 	}
 
 	return my_session;
@@ -274,10 +253,9 @@ freeSession(FILTER *instance, void *session)
 {
 DBS_SESSION	*my_session = (DBS_SESSION *)session;
 
-	free(my_session->filename);
 	free(my_session->clientHost);
 	free(my_session->userName);
-	/*free(my_session->sql);*/
+	free(my_session->sql);
 	free(session);
 	return;
 }
@@ -341,16 +319,23 @@ size_t i;
 		if ((ptr = modutil_get_SQL(queue)) != NULL)
 		{
 			my_session->query_end = false;
-			if (strlen(ptr) > 5) {
+			/* check for commit and rollback */
+			if (strlen(ptr) > 5)
+			{
 				size_t buf_size = strlen(ptr)+1;
 				char* buf = (char*)malloc(buf_size);
-				for (i=0; i < buf_size && i < 9; ++i) {
+				for (i=0; i < buf_size && i < 9; ++i)
+				{
 					buf[i] = tolower(ptr[i]);
 				}
-				if (strncmp(buf, "commit", 6) == 0) {
+				if (strncmp(buf, "commit", 6) == 0)
+				{
 					my_session->query_end = true;
-				} else if (strncmp(buf, "rollback", 8) == 0) {
-					if (my_session->sql != NULL) {
+				}
+				else if (strncmp(buf, "rollback", 8) == 0)
+				{
+					if (my_session->sql != NULL)
+					{
 						free(my_session->sql);
 					}
 					my_session->sql = NULL;
@@ -358,11 +343,18 @@ size_t i;
 				}
 			}
 
-			if (!my_session->query_end) {
-				if (my_session->sql == NULL) {
+			/* for normal sql statements */
+			if (!my_session->query_end)
+			{
+				/* first statement */
+				if (my_session->sql == NULL)
+				{
 					my_session->sql = strdup(ptr);
 					gettimeofday(&my_session->current_start, NULL);
-				} else {
+				}
+				/* distinguish statements with semicolon */
+				else
+				{
 					size_t len = strlen(my_session->sql) + strlen(ptr) + 2;
 					char* new_sql = (char*)malloc(len);
 					memset(new_sql, 0x00, len);
@@ -373,7 +365,9 @@ size_t i;
 					my_session->sql = new_sql;
 				}
 				my_session->current = ptr;
-			} else {
+			}
+			else
+			{
 				free(ptr);
 			}
 		}
@@ -391,15 +385,18 @@ DBS_SESSION	*my_session = (DBS_SESSION *)session;
 struct		timeval		tv, diff;
 int		i, inserted;
 
+/* found 'commit' and sql statements exist. */
 	if (my_session->query_end && my_session->sql != NULL)
 	{
 		gettimeofday(&tv, NULL);
 		timersub(&tv, &(my_session->current_start), &diff);
 
+		/* get latency */
 		uint64_t millis = (diff.tv_sec * (uint64_t)1000 + diff.tv_usec / 1000);
+		/* get timestamp */
 		uint64_t timestamp = (tv.tv_sec + (tv.tv_usec / (1000*1000)));
 
-		// print to log.
+		/* print to log. */
 		fprintf(my_instance->fp, "%ld,%s,%s,%ld,%s\n",
 				timestamp,
 				my_session->clientHost,
@@ -442,6 +439,6 @@ int		i;
 	if (my_session)
 	{
 		dcb_printf(dcb, "\t\tLogging to file %s.\n",
-			my_session->filename);
+			my_instance->filename);
 	}
 }
