@@ -82,6 +82,7 @@ typedef struct {
 	char	*source;	/* The source of the client connection */
 	char	*user;	/* The user name to filter on */
 	char	*filename;	/* filename */
+	char	*delimiter; /* delimiter for the log */
 
 	FILE* fp;
 } DBS_INSTANCE;
@@ -165,6 +166,9 @@ DBS_INSTANCE	*my_instance;
 
 		/* set default log filename */
 		my_instance->filename = strdup("dbseer_query.log");
+		/* set default delimiter */
+		my_instance->delimiter = strdup("|");
+
 		for (i = 0; params && params[i]; i++)
 		{
 			if (!strcmp(params[i]->name, "filename"))
@@ -176,6 +180,11 @@ DBS_INSTANCE	*my_instance;
 				my_instance->source = strdup(params[i]->value);
 			else if (!strcmp(params[i]->name, "user"))
 				my_instance->user = strdup(params[i]->value);
+			else if (!strcmp(params[i]->name, "delimiter"))
+			{
+				free(my_instance->delimiter);
+				my_instance->delimiter = strdup(params[i]->value);
+			}
 		}
 		my_instance->sessions = 0;
 	  my_instance->fp = fopen(my_instance->filename, "w");
@@ -334,13 +343,11 @@ size_t i;
 				}
 				else if (strncmp(buf, "rollback", 8) == 0)
 				{
-					if (my_session->sql != NULL)
-					{
-						free(my_session->sql);
-					}
+					free(my_session->sql);
 					my_session->sql = NULL;
 					my_session->query_end = true;
 				}
+				free(buf);
 			}
 
 			/* for normal sql statements */
@@ -364,12 +371,9 @@ size_t i;
 					free(my_session->sql);
 					my_session->sql = new_sql;
 				}
-				my_session->current = ptr;
 			}
-			else
-			{
-				free(ptr);
-			}
+
+			free(ptr);
 		}
 	}
 	/* Pass the query downstream */
@@ -397,11 +401,15 @@ int		i, inserted;
 		uint64_t timestamp = (tv.tv_sec + (tv.tv_usec / (1000*1000)));
 
 		/* print to log. */
-		fprintf(my_instance->fp, "%ld,%s,%s,%ld,%s\n",
+		fprintf(my_instance->fp, "%ld%s%s%s%s%s%ld%s%s\n",
 				timestamp,
+				my_instance->delimiter,
 				my_session->clientHost,
+				my_instance->delimiter,
 				my_session->userName,
+				my_instance->delimiter,
 				millis,
+				my_instance->delimiter,
 				my_session->sql);
 		free(my_session->sql);
 		my_session->sql = NULL;
