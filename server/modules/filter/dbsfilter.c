@@ -48,6 +48,7 @@ MODULE_INFO 	info = {
 };
 
 static char *version_str = "V0.1";
+static size_t buf_size = 10;
 
 /*
  * The filter entry points
@@ -108,6 +109,9 @@ typedef struct {
 	struct timeval	total;
 	struct timeval	current_start;
 	bool query_end;
+	char	*buf;
+	int	sql_index;
+	size_t		max_sql_size;
 } DBS_SESSION;
 
 /**
@@ -213,7 +217,11 @@ char		*remote, *user;
 	{
 		atomic_add(&my_instance->sessions,1);
 
-		my_session->sql = NULL;
+		my_session->max_sql_size = 64 * 1024; // default max query size of 64k.
+		my_session->sql = (char*)malloc(my_session->max_sql_size);
+		memset(my_session->sql, 0x00, my_session->max_sql_size);
+		my_session->buf = (char*)malloc(buf_size);
+		my_session->sql_index = 0;
 		my_session->n_statements = 0;
 		my_session->total.tv_sec = 0;
 		my_session->total.tv_usec = 0;
@@ -265,6 +273,7 @@ DBS_SESSION	*my_session = (DBS_SESSION *)session;
 	free(my_session->clientHost);
 	free(my_session->userName);
 	free(my_session->sql);
+	free(my_session->buf);
 	free(session);
 	return;
 }
@@ -331,9 +340,9 @@ size_t i;
 			/* check for commit and rollback */
 			if (strlen(ptr) > 5)
 			{
-				size_t buf_size = strlen(ptr)+1;
-				char* buf = (char*)malloc(buf_size);
-				for (i=0; i < buf_size && i < 9; ++i)
+				size_t ptr_size = strlen(ptr)+1;
+				char* buf = my_session->buf;
+				for (i=0; i < ptr_size && i < buf_size; ++i)
 				{
 					buf[i] = tolower(ptr[i]);
 				}
@@ -343,33 +352,47 @@ size_t i;
 				}
 				else if (strncmp(buf, "rollback", 8) == 0)
 				{
-					free(my_session->sql);
-					my_session->sql = NULL;
 					my_session->query_end = true;
 				}
-				free(buf);
 			}
 
 			/* for normal sql statements */
 			if (!my_session->query_end)
 			{
 				/* first statement */
-				if (my_session->sql == NULL)
+				if (my_session->sql_index == 0)
 				{
-					my_session->sql = strdup(ptr);
+					memcpy(my_session->sql + my_session->sql_index, ptr, strlen(ptr));
+					my_session->sql_index += strlen(ptr);
 					gettimeofday(&my_session->current_start, NULL);
 				}
 				/* distinguish statements with semicolon */
 				else
 				{
+					size_t new_sql_size = my_session->max_sql_size;
 					size_t len = strlen(my_session->sql) + strlen(ptr) + 2;
-					char* new_sql = (char*)malloc(len);
-					memset(new_sql, 0x00, len);
-					strcat(new_sql, my_session->sql);
-					strcat(new_sql, ";");
-					strcat(new_sql, ptr);
-					free(my_session->sql);
-					my_session->sql = new_sql;
+					while (len > new_sql_size)
+					{
+						new_sql_size *= 2;
+					}
+					if (new_sql_size > my_session->max_sql_size)
+					{
+						char* new_sql = (char*)malloc(new_sql_size);
+						memset(new_sql, 0x00, len);
+						strcat(new_sql, my_session->sql);
+						strcat(new_sql, ";");
+						strcat(new_sql, ptr);
+						free(my_session->sql);
+						my_session->sql = new_sql;
+						my_session->sql_index += (1 + strlen(ptr));
+						my_session->max_sql_size = new_sql_size;
+					}
+					else
+					{
+						*(my_session->sql + my_session->sql_index) = ';';
+						memcpy(my_session->sql + my_session->sql_index  + 1, ptr, strlen(ptr));
+						my_session->sql_index += (1 + strlen(ptr));
+					}
 				}
 			}
 
@@ -390,7 +413,7 @@ struct		timeval		tv, diff;
 int		i, inserted;
 
 /* found 'commit' and sql statements exist. */
-	if (my_session->query_end && my_session->sql != NULL)
+	if (my_session->query_end && my_session->sql_index > 0)
 	{
 		gettimeofday(&tv, NULL);
 		timersub(&tv, &(my_session->current_start), &diff);
@@ -399,6 +422,8 @@ int		i, inserted;
 		uint64_t millis = (diff.tv_sec * (uint64_t)1000 + diff.tv_usec / 1000);
 		/* get timestamp */
 		uint64_t timestamp = (tv.tv_sec + (tv.tv_usec / (1000*1000)));
+
+		*(my_session->sql + my_session->sql_index) = '\0';
 
 		/* print to log. */
 		fprintf(my_instance->fp, "%ld%s%s%s%s%s%ld%s%s\n",
@@ -411,8 +436,7 @@ int		i, inserted;
 				millis,
 				my_instance->delimiter,
 				my_session->sql);
-		free(my_session->sql);
-		my_session->sql = NULL;
+		my_session->sql_index = 0;
 	}
 
 	/* Pass the result upstream */
