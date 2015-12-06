@@ -257,6 +257,13 @@ static	void
 closeSession(FILTER *instance, void *session)
 {
 	DBS_SESSION	*my_session = (DBS_SESSION *)session;
+	DBS_INSTANCE	*my_instance = (DBS_INSTANCE *)instance;
+	if (my_instance->fp != NULL)
+	{
+		// flush FP when a session is closed.
+		fflush(my_instance->fp);
+	}
+
 }
 
 /**
