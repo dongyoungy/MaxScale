@@ -31,9 +31,11 @@
  * The filter makes no attempt to deal with query packets that do not fit
  * in a single GWBUF.
  *
- * Two optional parameters:
+ * Optional parameters:
  *	filename=<name of the file to which transaction performance logs are written (default=tpm.log)>
  *	delimiter=<delimiter for columns in a log (default='|')>
+ *	source=<source address to limit filter>
+ *	user=<username to limit filter>
  *
  * Date		Who		Description
  * 06/12/2015	Dong Young Yoon	Initial implementation
