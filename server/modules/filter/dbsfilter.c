@@ -199,7 +199,7 @@ DBS_INSTANCE	*my_instance;
 /**
  * Associate a new session with this instance of the filter.
  *
- * Create the file to log to and open it.
+ * Every session uses the same log file.
  *
  * @param instance	The filter instance data
  * @param session	The session itself
@@ -217,7 +217,7 @@ char		*remote, *user;
 	{
 		atomic_add(&my_instance->sessions,1);
 
-		my_session->max_sql_size = 64 * 1024; // default max query size of 64k.
+		my_session->max_sql_size = 4 * 1024; // default max query size of 4k.
 		my_session->sql = (char*)malloc(my_session->max_sql_size);
 		memset(my_session->sql, 0x00, my_session->max_sql_size);
 		my_session->buf = (char*)malloc(buf_size);
@@ -332,7 +332,7 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
 {
 DBS_INSTANCE	*my_instance = (DBS_INSTANCE *)instance;
 DBS_SESSION	*my_session = (DBS_SESSION *)session;
-char		*ptr;
+char		*ptr = NULL;
 size_t i;
 
 	if (my_session->active)
@@ -360,52 +360,57 @@ size_t i;
 				else if (strncmp(buf, "rollback", 8) == 0)
 				{
 					my_session->query_end = true;
+					my_session->sql_index = 0;
 				}
 			}
 
 			/* for normal sql statements */
 			if (!my_session->query_end)
 			{
+				 /* check and expand buffer size first. */
+				size_t new_sql_size = my_session->max_sql_size;
+				size_t len = my_session->sql_index + strlen(ptr) + 2;
+
+				/* double buffer size until the buffer fits the query */
+				while (len > new_sql_size)
+				{
+					new_sql_size *= 2;
+				}
+				if (new_sql_size > my_session->max_sql_size)
+				{
+					char* new_sql = (char*)malloc(new_sql_size);
+					if (new_sql == NULL)
+					{
+						skygw_log_write(LOGFILE_ERROR, "Error: Out of memory.");
+						goto retblock;
+					}
+					memcpy(new_sql, my_session->sql, my_session->sql_index);
+					free(my_session->sql);
+					my_session->sql = new_sql;
+					my_session->max_sql_size = new_sql_size;
+				}
+
 				/* first statement */
 				if (my_session->sql_index == 0)
 				{
-					memcpy(my_session->sql + my_session->sql_index, ptr, strlen(ptr));
+					memcpy(my_session->sql, ptr, strlen(ptr));
 					my_session->sql_index += strlen(ptr);
 					gettimeofday(&my_session->current_start, NULL);
 				}
-				/* distinguish statements with semicolon */
+				/* otherwise, append the statement with semicolon as a statement delimiter */
 				else
 				{
-					size_t new_sql_size = my_session->max_sql_size;
-					size_t len = strlen(my_session->sql) + strlen(ptr) + 2;
-					while (len > new_sql_size)
-					{
-						new_sql_size *= 2;
-					}
-					if (new_sql_size > my_session->max_sql_size)
-					{
-						char* new_sql = (char*)malloc(new_sql_size);
-						memset(new_sql, 0x00, len);
-						strcat(new_sql, my_session->sql);
-						strcat(new_sql, ";");
-						strcat(new_sql, ptr);
-						free(my_session->sql);
-						my_session->sql = new_sql;
-						my_session->sql_index += (1 + strlen(ptr));
-						my_session->max_sql_size = new_sql_size;
-					}
-					else
-					{
-						*(my_session->sql + my_session->sql_index) = ';';
-						memcpy(my_session->sql + my_session->sql_index  + 1, ptr, strlen(ptr));
-						my_session->sql_index += (1 + strlen(ptr));
-					}
+					*(my_session->sql + my_session->sql_index) = ';';
+					memcpy(my_session->sql + my_session->sql_index  + 1, ptr, strlen(ptr));
+					my_session->sql_index += (1 + strlen(ptr));
 				}
 			}
-
-			free(ptr);
 		}
 	}
+
+retblock:
+
+	free(ptr);
 	/* Pass the query downstream */
 	return my_session->down.routeQuery(my_session->down.instance,
 			my_session->down.session, queue);
@@ -443,6 +448,7 @@ int		i, inserted;
 				millis,
 				my_instance->delimiter,
 				my_session->sql);
+
 		my_session->sql_index = 0;
 	}
 
