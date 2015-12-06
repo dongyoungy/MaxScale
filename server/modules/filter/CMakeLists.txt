@@ -26,9 +26,9 @@ target_link_libraries(qlafilter log_manager)
 set_target_properties(qlafilter PROPERTIES VERSION "1.1.1")
 install(TARGETS qlafilter DESTINATION ${MAXSCALE_LIBDIR})
 
-add_library(dbsfilter SHARED dbsfilter.c)
-target_link_libraries(dbsfilter log_manager utils)
-install(TARGETS dbsfilter DESTINATION ${MAXSCALE_LIBDIR})
+add_library(tpmfilter SHARED tpmfilter.c)
+target_link_libraries(tpmfilter log_manager utils)
+install(TARGETS tpmfilter DESTINATION ${MAXSCALE_LIBDIR})
 
 add_library(tee SHARED tee.c)
 target_link_libraries(tee log_manager)

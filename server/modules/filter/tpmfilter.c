@@ -17,11 +17,30 @@
  */
 
 /**
- * @file dbsfilter.c - Query Log For DBSeer
+ * @file tpmfilter.c - Transaction Performance Monitoring Filter
  * @verbatim
+ *
+ * A simple filter that groups queries into a transaction with the latency.
+ *
+ * The filter reads the routed queries, groups them into a transaction by
+ * detecting 'commit' statement at the end. The transactions are timestamped with a
+ * unix-timestamp and the latency of a transaction is recorded in milliseconds.
+ * The filter will not record transactions that are rolled back.
+ * Please note that the filter only works with 'autocommit' option disabled.
+ *
+ * The filter makes no attempt to deal with query packets that do not fit
+ * in a single GWBUF.
+ *
+ * Two optional parameters:
+ *	filename=<name of the file to which transaction performance logs are written (default=tpm.log)>
+ *	delimiter=<delimiter for columns in a log (default='|')>
+ *
+ * Date		Who		Description
+ * 06/12/2015	Dong Young Yoon	Initial implementation
  *
  * @endverbatim
  */
+
 #include <stdio.h>
 #include <fcntl.h>
 #include <filter.h>
@@ -44,11 +63,12 @@ MODULE_INFO 	info = {
 	MODULE_API_FILTER,
 	MODULE_GA,
 	FILTER_VERSION,
-	"DBSeer query logging filter"
+	"Transaction Performance Monitoring filter"
 };
 
 static char *version_str = "V0.1";
 static size_t buf_size = 10;
+static size_t sql_size_limit = 8 * 1024 * 1024; /* The maximum size for query statements in a transaction */
 
 /*
  * The filter entry points
@@ -169,7 +189,7 @@ DBS_INSTANCE	*my_instance;
 		my_instance->user = NULL;
 
 		/* set default log filename */
-		my_instance->filename = strdup("dbseer_query.log");
+		my_instance->filename = strdup("tpm.log");
 		/* set default delimiter */
 		my_instance->delimiter = strdup("|");
 
@@ -371,6 +391,13 @@ size_t i;
 				size_t new_sql_size = my_session->max_sql_size;
 				size_t len = my_session->sql_index + strlen(ptr) + 2;
 
+				/* if the total length of query statements exceeds the maximum limit, print an error and return */
+				if (len > sql_size_limit)
+				{
+						skygw_log_write(LOGFILE_ERROR, "Error: The size of query statements exceeds the maximum buffer limit.");
+						goto retblock;
+				}
+
 				/* double buffer size until the buffer fits the query */
 				while (len > new_sql_size)
 				{
@@ -381,7 +408,7 @@ size_t i;
 					char* new_sql = (char*)malloc(new_sql_size);
 					if (new_sql == NULL)
 					{
-						skygw_log_write(LOGFILE_ERROR, "Error: Out of memory.");
+						skygw_log_write(LOGFILE_ERROR, "Error: Memory allocation failure.");
 						goto retblock;
 					}
 					memcpy(new_sql, my_session->sql, my_session->sql_index);
