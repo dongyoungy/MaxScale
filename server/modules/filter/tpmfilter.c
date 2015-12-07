@@ -214,6 +214,11 @@ DBS_INSTANCE	*my_instance;
 		}
 		my_instance->sessions = 0;
 	  my_instance->fp = fopen(my_instance->filename, "w");
+		if (my_instance->fp == NULL)
+		{
+			skygw_log_write(LOGFILE_ERROR, "Error: Opening output file '%s' for tpmfilter failed due to %d, %s", my_instance->filename, errno, strerror(errno));
+			return NULL;
+		}
 	}
 	return (FILTER *)my_instance;
 }
