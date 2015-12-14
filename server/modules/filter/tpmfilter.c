@@ -34,6 +34,7 @@
  * Optional parameters:
  *	filename=<name of the file to which transaction performance logs are written (default=tpm.log)>
  *	delimiter=<delimiter for columns in a log (default='|')>
+ *	query_delimiter=<delimiter for query statements in a transaction (default=';')>
  *	source=<source address to limit filter>
  *	user=<username to limit filter>
  *
@@ -70,7 +71,7 @@ MODULE_INFO 	info = {
 
 static char *version_str = "V0.1";
 static size_t buf_size = 10;
-static size_t sql_size_limit = 8 * 1024 * 1024; /* The maximum size for query statements in a transaction */
+static size_t sql_size_limit = 64 * 1024 * 1024; /* The maximum size for query statements in a transaction (64MB) */
 
 /*
  * The filter entry points
@@ -105,8 +106,10 @@ typedef struct {
 	char	*source;	/* The source of the client connection */
 	char	*user;	/* The user name to filter on */
 	char	*filename;	/* filename */
-	char	*delimiter; /* delimiter for the log */
+	char	*delimiter; /* delimiter for columns in a log */
+	char	*query_delimiter; /* delimiter for query statements in a transaction */
 
+	int query_delimiter_size; /* the length of the query delimiter */
 	FILE* fp;
 } DBS_INSTANCE;
 
@@ -194,6 +197,9 @@ DBS_INSTANCE	*my_instance;
 		my_instance->filename = strdup("tpm.log");
 		/* set default delimiter */
 		my_instance->delimiter = strdup("|");
+		/* set default query delimiter */
+		my_instance->query_delimiter = strdup(";");
+		my_instance->query_delimiter_size = 1;
 
 		for (i = 0; params && params[i]; i++)
 		{
@@ -210,6 +216,12 @@ DBS_INSTANCE	*my_instance;
 			{
 				free(my_instance->delimiter);
 				my_instance->delimiter = strdup(params[i]->value);
+			}
+			else if (!strcmp(params[i]->name, "query_delimiter"))
+			{
+				free(my_instance->query_delimiter);
+				my_instance->query_delimiter = strdup(params[i]->value);
+				my_instance->query_delimiter_size = strlen(my_instance->query_delimiter);
 			}
 		}
 		my_instance->sessions = 0;
@@ -396,12 +408,12 @@ size_t i;
 			{
 				 /* check and expand buffer size first. */
 				size_t new_sql_size = my_session->max_sql_size;
-				size_t len = my_session->sql_index + strlen(ptr) + 2;
+				size_t len = my_session->sql_index + strlen(ptr) + my_instance->query_delimiter_size + 1;
 
 				/* if the total length of query statements exceeds the maximum limit, print an error and return */
 				if (len > sql_size_limit)
 				{
-						skygw_log_write(LOGFILE_ERROR, "Error: The size of query statements exceeds the maximum buffer limit.");
+						skygw_log_write(LOGFILE_ERROR, "Error: The size of query statements exceeds the maximum buffer limit of 64MB.");
 						goto retblock;
 				}
 
@@ -434,9 +446,12 @@ size_t i;
 				/* otherwise, append the statement with semicolon as a statement delimiter */
 				else
 				{
-					*(my_session->sql + my_session->sql_index) = ';';
-					memcpy(my_session->sql + my_session->sql_index  + 1, ptr, strlen(ptr));
-					my_session->sql_index += (1 + strlen(ptr));
+					/* append a query delimiter */
+					memcpy(my_session->sql + my_session->sql_index, my_instance->query_delimiter, my_instance->query_delimiter_size);
+					/* append the next query statement */
+					memcpy(my_session->sql + my_session->sql_index + my_instance->query_delimiter_size, ptr, strlen(ptr));
+					/* set new pointer for the buffer */
+					my_session->sql_index += (my_instance->query_delimiter_size + strlen(ptr));
 				}
 			}
 		}
