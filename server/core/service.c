@@ -163,6 +163,11 @@ service_alloc(const char *servname, const char *router)
     service->stats.started = time(0);
     service->stats.n_failed_starts = 0;
     service->state = SERVICE_STATE_ALLOC;
+
+    service->log_filename = NULL;
+    service->log_delimiter = NULL;
+    service->query_delimiter = NULL;
+
     spinlock_init(&service->spin);
     spinlock_init(&service->users_table_spin);
 
@@ -1839,6 +1844,66 @@ char *
 serviceGetWeightingParameter(SERVICE *service)
 {
     return service->weightby;
+}
+
+void
+serviceSetLogFilename(SERVICE* service, char* param)
+{
+    if (service->log_filename)
+    {
+        free(service->log_filename);
+        service->log_filename = NULL;
+    }
+    if (param)
+    {
+        service->log_filename = strdup(param);
+    }
+}
+
+char *
+serviceGetLogFilename(SERVICE *service)
+{
+    return service->log_filename;
+}
+
+void
+serviceSetLogDelimiter(SERVICE* service, char* param)
+{
+    if (service->log_delimiter)
+    {
+        free(service->log_delimiter);
+        service->log_delimiter = NULL;
+    }
+    if (param)
+    {
+        service->log_delimiter = strdup(param);
+    }
+}
+
+char *
+serviceGetLogDelimiter(SERVICE *service)
+{
+    return service->log_delimiter;
+}
+
+void
+serviceSetQueryDelimiter(SERVICE* service, char* param)
+{
+    if (service->query_delimiter)
+    {
+        free(service->query_delimiter);
+        service->query_delimiter = NULL;
+    }
+    if (param)
+    {
+        service->query_delimiter = strdup(param);
+    }
+}
+
+char *
+serviceGetQueryDelimiter(SERVICE *service)
+{
+    return service->query_delimiter;
 }
 
 /**

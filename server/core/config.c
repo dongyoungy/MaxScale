@@ -485,6 +485,14 @@ process_config_context(CONFIG_CONTEXT *context)
                 bool  is_schemarouter = false;
                 char *allow_localhost_match_wildcard_host;
 
+                char *log_filename;
+                char *log_delimiter;
+                char *query_delimiter;
+
+                log_filename = config_get_value(obj->parameters, "log_filename");
+                log_delimiter = config_get_value(obj->parameters, "log_delimiter");
+                query_delimiter = config_get_value(obj->parameters, "query_delimiter");
+
                 obj->element = service_alloc(obj->object, router);
                 user = config_get_value(obj->parameters, "user");
                 auth = config_get_value(obj->parameters, "passwd");
@@ -661,6 +669,18 @@ process_config_context(CONFIG_CONTEXT *context)
                         }
                     }
                 }
+                if (log_filename)
+                {
+                    serviceSetLogFilename(obj->element, log_filename);
+                }
+                if (log_delimiter)
+                {
+                    serviceSetLogDelimiter(obj->element, log_delimiter);
+                }
+                if (query_delimiter)
+                {
+                    serviceSetQueryDelimiter(obj->element, query_delimiter);
+                }
 
                 serviceSetRetryOnFailure(obj->element, config_get_value(obj->parameters, "retry_on_failure"));
 
@@ -759,7 +779,7 @@ process_config_context(CONFIG_CONTEXT *context)
                     bool              succp;
 
                     param = config_get_param(
-                        obj->parameters, 
+                        obj->parameters,
                         "max_slave_replication_lag");
 
                     if (param == NULL)
@@ -1815,6 +1835,14 @@ process_config_update(CONFIG_CONTEXT *context)
                     char *version_string;
                     char *allow_localhost_match_wildcard_host;
 
+                    char *log_filename;
+                    char *log_delimiter;
+                    char *query_delimiter;
+
+                    log_filename = config_get_value(obj->parameters, "log_filename");
+                    log_delimiter = config_get_value(obj->parameters, "log_delimiter");
+                    query_delimiter = config_get_value(obj->parameters, "query_delimiter");
+
                     enable_root_user = config_get_value(obj->parameters, "enable_root_user");
 
                     connection_timeout = config_get_value(obj->parameters, "connection_timeout");
@@ -1845,6 +1873,19 @@ process_config_update(CONFIG_CONTEXT *context)
                     if ((param = config_get_param(obj->parameters, "ignore_databases_regex")))
                     {
                         service_set_param_value(service, param, param->value, 0, STRING_TYPE);
+                    }
+
+                    if (log_filename)
+                    {
+                        serviceSetLogFilename(service, log_filename);
+                    }
+                    if (log_delimiter)
+                    {
+                        serviceSetLogDelimiter(service, log_delimiter);
+                    }
+                    if (query_delimiter)
+                    {
+                        serviceSetQueryDelimiter(service, query_delimiter);
                     }
 
                     if (version_string)

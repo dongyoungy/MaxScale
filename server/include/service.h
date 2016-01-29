@@ -195,6 +195,10 @@ typedef struct service
     bool ssl_init_done;                /*< If SSL has already been initialized for this service */
     bool retry_start;                  /*< If starting of the service should be retried later */
     bool log_auth_warnings;            /*< Log authentication failures and warnings */
+
+    char* log_delimiter;
+    char* query_delimiter;
+    char* log_filename;
 } SERVICE;
 
 typedef enum count_spec_t
@@ -260,5 +264,12 @@ extern void service_shutdown();
 extern int serviceSessionCountAll();
 extern RESULTSET *serviceGetList();
 extern RESULTSET *serviceGetListenerList();
+
+extern void serviceSetLogFilename(SERVICE *, char *value);
+extern void serviceSetLogDelimiter(SERVICE *, char *value);
+extern void serviceSetQueryDelimiter(SERVICE *, char *value);
+extern char* serviceGetLogFilename(SERVICE *);
+extern char* serviceGetLogDelimiter(SERVICE *);
+extern char* serviceGetQueryDelimiter(SERVICE *);
 
 #endif

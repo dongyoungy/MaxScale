@@ -59,6 +59,12 @@ typedef struct router_client_session
     DCB *backend_dcb; /*< DCB Connection to the backend      */
     struct router_client_session *next;
     int rses_capabilities; /*< input type, for example */
+    struct timeval current_start;
+    bool sql_end;
+    int max_sql_size;
+    int sql_index;
+    char *sql;
+    char *buf;
 #if defined(SS_DEBUG)
     skygw_chk_t rses_chk_tail;
 #endif
@@ -85,6 +91,11 @@ typedef struct router_instance
     unsigned int bitmask; /*< Bitmask to apply to server->status       */
     unsigned int bitvalue; /*< Required value of server->status         */
     ROUTER_STATS stats; /*< Statistics for this router               */
+    char *log_filename;
+    char *log_delimiter;
+    char *query_delimiter;
+    int query_delimiter_size;
+    FILE *log_file;
     struct router_instance
     *next;
 } ROUTER_INSTANCE;
