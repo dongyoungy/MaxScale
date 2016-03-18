@@ -14,9 +14,9 @@ The configuration consists of mandatory and optional parameters.
 
 ## Mandatory parameters
 
-**`type`** specifies the type of service. For performancelogroute module the type is `router`:
+**`type`** specifies the type of service. For performancelogroute module the type is `service`:
 
-    type=router
+    type=service
 
 **`router`** specifies the router module to be used. For performancelogroute the value is `performancelogroute`:
 
@@ -45,9 +45,13 @@ passwd=<password>
 
     log_delimiter=:::
 
+**`query_delimiter`** defines a delimiter that is used to distinguish different SQL statements in a transaction.
 
+    query_delimiter=@@@
 
 ## Optional parameters
+
+**NOTE: the performancelogroute router shares same optional paramters with the readconnroute router.**
 
 The **`weightby`** parameter defines the name of the value which is used to calculate the weights of the servers. Here is an example server configuration with the `serv_weight` parameter used as the weighting parameter.
 
@@ -68,7 +72,7 @@ serv_weight=1
 
 [Read Service]
 type=service
-router=readconnroute
+router=performancelogroute
 servers=server1,server2
 weightby=serv_weight
 ```
@@ -97,18 +101,43 @@ If no `router_options` parameter is configured in the service definition, the ro
 
 ## Examples
 
-The most common use for the readconnroute is to provide either a read or write port for an application. This provides a more lightweight routing solution than the more complex readwritesplit router but requires the application to be able to use distinct write and read ports.
+For examples related to readconnroute, take a look at [readconnroute](./ReadConnRoute.md) documentation.
 
-To configure a  read-only service that tolerates master failures, we first need to add a new section in to the configuration file.
+### Example 1 - Log transactions for performance analysis
+
+You want to log every transaction with its SQL statements and latency for future transaction performance analysis.
+
+Add a performancelogroute router with the following configuration:
 
 ```
-[Read Service]
+[maxscale]
+threads=1
+
+[Performance Log Router]
 type=service
-router=readconnroute
-servers=slave1,slave2,slave3
-router_options=slave
+router=performancelogroute
+servers=server1
+user=root
+passwd=
+enable_root_user=true
+log_filename=/var/logs/maxscale/perf.log
+log_delimiter=:::
+query_delimiter=@@@
+
+[Read Connection Listener]
+type=listener
+service=Performance Log Router
+protocol=MySQLClient
+port=3600
+socket=/home/dyoon/maxscale/readconn.sock
 ```
 
-Here the `router_options`designates slaves as the only valid server type. With this configuration, the queries are load balanced across the slave servers.
+The following is an example log that is generated from the performancelogroute router with the above configuration:
 
-For more complex examples of the readconnroute router, take a look at the examples in the [Tutorials](../Tutorials) folder.
+```
+1453751768:::server1:::localhost:::3:::UPDATE WAREHOUSE SET W_YTD = W_YTD + 900.86  WHERE W_ID = 2 @@@SELECT W_STREET_1, W_STREET_2, W_CITY, W_STATE, W_ZIP, W_NAME FROM WAREHOUSE WHERE W_ID = 2@@@UPDATE DISTRICT SET D_YTD = D_YTD + 900.86 WHERE D_W_ID = 2 AND D_ID = 5@@@SELECT D_STREET_1, D_STREET_2, D_CITY, D_STATE, D_ZIP, D_NAME FROM DISTRICT WHERE D_W_ID = 2 AND D_ID = 5@@@SELECT C_FIRST, C_MIDDLE, C_ID, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP, C_PHONE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_SINCE FROM CUSTOMER WHERE C_W_ID = 2 AND C_D_ID = 5 AND C_LAST = 'CALLYCALLYATION' ORDER BY C_FIRST@@@UPDATE CUSTOMER SET C_BALANCE = -90026.89, C_YTD_PAYMENT = 93507.06, C_PAYMENT_CNT = 38 WHERE C_W_ID = 2 AND C_D_ID = 5 AND C_ID = 779@@@INSERT INTO HISTORY (H_C_D_ID, H_C_W_ID, H_C_ID, H_D_ID, H_W_ID, H_DATE, H_AMOUNT, H_DATA)  VALUES (5,2,779,5,2,'2016-01-25 14:56:08',900.86,'gqfla    adopdon')
+1453751768:::server1:::localhost:::5:::UPDATE WAREHOUSE SET W_YTD = W_YTD + 3679.75  WHERE W_ID = 2 @@@SELECT W_STREET_1, W_STREET_2, W_CITY, W_STATE, W_ZIP, W_NAME FROM WAREHOUSE WHERE W_ID = 2@@@UPDATE DISTRICT SET D_YTD = D_YTD + 3679.75 WHERE D_W_ID = 2 AND D_ID = 1@@@SELECT D_STREET_1, D_STREET_2, D_CITY, D_STATE, D_ZIP, D_NAME FROM DISTRICT WHERE D_W_ID = 2 AND D_ID = 1@@@SELECT C_FIRST, C_MIDDLE, C_LAST, C_STREET_1, C_STREET_2, C_CITY, C_STATE, C_ZIP, C_PHONE, C_CREDIT, C_CREDIT_LIM, C_DISCOUNT, C_BALANCE, C_YTD_PAYMENT, C_PAYMENT_CNT, C_SINCE FROM CUSTOMER WHERE C_W_ID = 2 AND C_D_ID = 1 AND C_ID = 203@@@UPDATE CUSTOMER SET C_BALANCE = 1600482.5, C_YTD_PAYMENT = 1192789.8, C_PAYMENT_CNT = 485 WHERE C_W_ID = 2 AND C_D_ID = 1 AND C_ID = 203@@@INSERT INTO HISTORY (H_C_D_ID, H_C_W_ID, H_C_ID, H_D_ID, H_W_ID, H_DATE, H_AMOUNT, H_DATA)  VALUES (1,2,203,1,2,'2016-01-25 14:56:08',3679.75,'gqfla    uquslfu')
+...
+```
+
+Note that 3 and 5 are latencies of each transaction in milliseconds.

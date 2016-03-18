@@ -1,4 +1,19 @@
-# MaxScale by MariaDB Corporation
+# MariaDB MaxScale for DBSeer
+
+This version of MariaDB MaxScale contains a custom router plugin, called **performancelogroute**, that logs necessary information for DBSeer, such as SQL statements, latency, etc.
+
+## Documentation
+
+For information about installing and using MaxScale, please refer to the 
+[documentation](Documentation/Documentation-Contents.md).
+
+For information about using the performancelogroute plugin, please refer to the [documentation](Documentation/Documentation/Routers/PerformanceLogRoute.md).
+
+For information about DBSeer, please visit the DBSeer github [page](http://https://github.com/barzan/dbseer).
+
+For information about DBSeer middleware, please visit the DBSeer middleware github [page](https://github.com/dongyoungy/dbseer_middleware).
+
+## MaxScale by MariaDB Corporation
 
 The MariaDB Corporation MaxScale is an intelligent proxy that allows forwarding of
 database statements to one or more database servers using complex rules,
@@ -31,7 +46,3 @@ issues and communicate with the MaxScale community.
 Bugs can be reported in the MariaDB Corporation bugs database
 	[https://mariadb.atlassian.net/projects/MXS/issues](https://mariadb.atlassian.net/projects/MXS/issues)
 
-# Documentation
-
-For information about installing and using MaxScale, please refer to the 
-[documentation](Documentation/Documentation-Contents.md).
