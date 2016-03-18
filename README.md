@@ -9,7 +9,7 @@ For information about installing and using MaxScale, please refer to the
 
 For information about using the performancelogroute plugin, please refer to the [documentation](Documentation/Routers/PerformanceLogRoute.md).
 
-For information about DBSeer, please visit the DBSeer github [page](http://https://github.com/barzan/dbseer).
+For information about DBSeer, please visit the DBSeer github [page](https://github.com/barzan/dbseer).
 
 For information about DBSeer middleware, please visit the DBSeer middleware github [page](https://github.com/dongyoungy/dbseer_middleware).
 
