@@ -1361,7 +1361,7 @@ validate_triggers:
                         AMQP_BASIC_MESSAGE_ID_FLAG |
                         AMQP_BASIC_CORRELATION_ID_FLAG;
                     prop->content_type = amqp_cstring_bytes("text/plain");
-                    prop->delivery_mode = AMQP_DELIVERY_PERSISTENT;
+                    //prop->delivery_mode = AMQP_DELIVERY_PERSISTENT;
                     prop->correlation_id = amqp_cstring_bytes(my_session->uid);
                     prop->message_id = amqp_cstring_bytes("query");
                 }
@@ -1535,7 +1535,7 @@ static int clientReply(FILTER* instance, void *session, GWBUF *reply)
                     AMQP_BASIC_MESSAGE_ID_FLAG |
                     AMQP_BASIC_CORRELATION_ID_FLAG;
                 prop->content_type = amqp_cstring_bytes("text/plain");
-                prop->delivery_mode = AMQP_DELIVERY_PERSISTENT;
+                //prop->delivery_mode = AMQP_DELIVERY_PERSISTENT;
                 prop->correlation_id = amqp_cstring_bytes(my_session->uid);
                 prop->message_id = amqp_cstring_bytes("reply");
             }
