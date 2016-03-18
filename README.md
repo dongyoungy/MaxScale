@@ -7,7 +7,7 @@ This version of MariaDB MaxScale contains a custom router plugin, called **perfo
 For information about installing and using MaxScale, please refer to the 
 [documentation](Documentation/Documentation-Contents.md).
 
-For information about using the performancelogroute plugin, please refer to the [documentation](Documentation/Documentation/Routers/PerformanceLogRoute.md).
+For information about using the performancelogroute plugin, please refer to the [documentation](Documentation/Routers/PerformanceLogRoute.md).
 
 For information about DBSeer, please visit the DBSeer github [page](http://https://github.com/barzan/dbseer).
 
