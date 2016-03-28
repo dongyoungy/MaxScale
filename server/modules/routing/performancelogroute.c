@@ -375,9 +375,9 @@ createInstance(SERVICE *service, char **options)
         free(inst->log_filename);
         inst->log_filename = strdup(log_filename);
         /* set default log and query delimiters */
-        inst->log_delimiter = strdup("|");
-        inst->query_delimiter = strdup(";");
-        inst->query_delimiter_size = 1;
+        inst->log_delimiter = strdup(":::");
+        inst->query_delimiter = strdup("@@@");
+        inst->query_delimiter_size = 3;
 
         if ((log_delimiter = serviceGetLogDelimiter(service)) != NULL)
         {
