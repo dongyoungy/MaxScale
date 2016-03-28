@@ -13,6 +13,16 @@ For information about DBSeer, please visit the DBSeer github [page](https://gith
 
 For information about DBSeer middleware, please visit the DBSeer middleware github [page](https://github.com/dongyoungy/dbseer_middleware).
 
+### Running this version of MaxScale locally
+
+If you installed this MaxScale locally, you should specify each path that MaxScale requires in the command line. For example, you may need to execute MaxScale with the following command:
+
+```
+./bin/maxscale -f /home/dyoon/maxscale/maxscale.cnf -L /home/dyoon/maxscale/log -D /home/dyoon/maxscale/data -P /home/dyoon/maxscale/run -B /home/dyoon/maxscale/lib64/maxscale --language=/home/dyoon/mariadb/share/english
+```
+
+You need to create and specify appropriate directories for log, data and pid directories. You also need to specify `libdir` (**-B**) directory as the library  (e.g., *lib64/maxscale*) directory in your local MaxScale installation path.
+
 ## MaxScale by MariaDB Corporation
 
 The MariaDB Corporation MaxScale is an intelligent proxy that allows forwarding of
