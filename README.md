@@ -1,13 +1,13 @@
 # MariaDB MaxScale for DBSeer
 
-This version of MariaDB MaxScale contains a custom router plugin, called **performancelogroute**, that logs necessary information for DBSeer, such as SQL statements, latency, etc.
+This version of MariaDB MaxScale contains a custom router plugin, called **dbseerroute**, that logs necessary information for DBSeer, such as SQL statements, latency, etc.
 
 ## Documentation
 
 For information about installing and using MaxScale, please refer to the 
 [documentation](Documentation/Documentation-Contents.md) (look at *Building MaxScale from Source Code* as you need to build from source). 
 
-For information about using the performancelogroute plugin, please refer to the [documentation](Documentation/Routers/PerformanceLogRoute.md).
+For information about using the dbseerroute plugin, please refer to the [documentation](Documentation/Routers/DBSeerRoute.md).
 
 For information about DBSeer, please visit the DBSeer github [page](https://github.com/barzan/dbseer).
 

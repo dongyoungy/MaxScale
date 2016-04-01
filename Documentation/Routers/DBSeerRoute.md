@@ -1,24 +1,24 @@
-# PerformanceLogRoute
+# DBSeerRoute
 
-This document provides an overview of the **performancelogroute** router module and its intended use case scenarios. It also displays all router configuration parameters with their descriptions.
+This document provides an overview of the **dbseerroute** router module and its intended use case scenarios. It also displays all router configuration parameters with their descriptions.
 
 ## Overview
 
-The performancelogroute router is a modified version of the readconnroute router. The performancelogroute router provides simple and lightweight load balancing across a set of servers just like readconnroute router. The router can also be configured to balance connections based on a weighting parameter defined in the server's section. The only difference is that the router logs all committed transactions with necessary information, such as timestamp, server, SQL statements, latency, etc., which can be used later for transaction performance analysis.
+The dbseerroute router is a modified version of the readconnroute router. The performancelogroute router provides simple and lightweight load balancing across a set of servers just like readconnroute router. The router can also be configured to balance connections based on a weighting parameter defined in the server's section. The only difference is that the router logs all committed transactions with necessary information, such as timestamp, server, SQL statements, latency, etc., which can be used later for transaction performance analysis.
 
 ## Configuration
 
-Performancelogroute router-specific settings are specified in the configuration file of MaxScale in its specific section. The section can be freely named but the name is used later as a reference from listener section.
+DBSeerRoute router-specific settings are specified in the configuration file of MaxScale in its specific section. The section can be freely named but the name is used later as a reference from listener section.
 
 The configuration consists of mandatory and optional parameters.
 
 ## Mandatory parameters
 
-**`type`** specifies the type of service. For performancelogroute module the type is `service`:
+**`type`** specifies the type of service. For dbseerroute module the type is `service`:
 
     type=service
 
-**`router`** specifies the router module to be used. For performancelogroute the value is `performancelogroute`:
+**`router`** specifies the router module to be used. For dbseerroute the value is `dbseerroute`:
 
     router=performancelogroute
 
@@ -37,7 +37,7 @@ user=<username>
 passwd=<password>
 ```
 
-**`log_filename`** is the name of the file, which performancelogroute will write transaction logs to:
+**`log_filename`** is the name of the file, which dbseerroute will write transaction logs to:
 
     log_filename=/tmp/transaction.log
 
@@ -49,9 +49,13 @@ passwd=<password>
 
     query_delimiter=@@@
 
+**`named_pipe`** is the path to a named pipe, which dbseerroute uses to communicate with the DBSeer middleware.
+
+	named_pipe=/tmp/dbseerroute
+	
 ## Optional parameters
 
-**NOTE: the performancelogroute router shares same optional paramters with the readconnroute router.**
+**NOTE: the dbseerroute router shares same optional paramters with the readconnroute router.**
 
 The **`weightby`** parameter defines the name of the value which is used to calculate the weights of the servers. Here is an example server configuration with the `serv_weight` parameter used as the weighting parameter.
 
@@ -72,7 +76,7 @@ serv_weight=1
 
 [Read Service]
 type=service
-router=performancelogroute
+router=dbseerroute
 servers=server1,server2
 weightby=serv_weight
 ```
@@ -107,7 +111,7 @@ For examples related to readconnroute, take a look at [readconnroute](./ReadConn
 
 You want to log every transaction with its SQL statements and latency for future transaction performance analysis.
 
-Add a performancelogroute router with the following configuration:
+Add a dbseerroute router with the following configuration:
 
 ```
 [maxscale]
@@ -115,7 +119,7 @@ threads=1
 
 [Performance Log Router]
 type=service
-router=performancelogroute
+router=dbseerroute
 servers=server1
 user=root
 passwd=
@@ -123,6 +127,7 @@ enable_root_user=true
 log_filename=/var/logs/maxscale/perf.log
 log_delimiter=:::
 query_delimiter=@@@
+named_pipe=/tmp/dbseerroute
 
 [Read Connection Listener]
 type=listener
