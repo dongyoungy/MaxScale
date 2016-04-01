@@ -199,6 +199,9 @@ typedef struct service
     char* log_delimiter;
     char* query_delimiter;
     char* log_filename;
+    char* named_pipe;
+    int named_pipe_fd;
+    bool log_enabled;
 } SERVICE;
 
 typedef enum count_spec_t
@@ -268,8 +271,10 @@ extern RESULTSET *serviceGetListenerList();
 extern void serviceSetLogFilename(SERVICE *, char *value);
 extern void serviceSetLogDelimiter(SERVICE *, char *value);
 extern void serviceSetQueryDelimiter(SERVICE *, char *value);
+extern void serviceSetNamedPipe(SERVICE *, char *value);
 extern char* serviceGetLogFilename(SERVICE *);
 extern char* serviceGetLogDelimiter(SERVICE *);
 extern char* serviceGetQueryDelimiter(SERVICE *);
+extern char* serviceGetNamedPipe(SERVICE *);
 
 #endif

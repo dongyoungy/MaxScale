@@ -488,10 +488,12 @@ process_config_context(CONFIG_CONTEXT *context)
                 char *log_filename;
                 char *log_delimiter;
                 char *query_delimiter;
+                char *named_pipe;
 
                 log_filename = config_get_value(obj->parameters, "log_filename");
                 log_delimiter = config_get_value(obj->parameters, "log_delimiter");
                 query_delimiter = config_get_value(obj->parameters, "query_delimiter");
+                named_pipe = config_get_value(obj->parameters, "named_pipe");
 
                 obj->element = service_alloc(obj->object, router);
                 user = config_get_value(obj->parameters, "user");
@@ -680,6 +682,10 @@ process_config_context(CONFIG_CONTEXT *context)
                 if (query_delimiter)
                 {
                     serviceSetQueryDelimiter(obj->element, query_delimiter);
+                }
+                if (named_pipe)
+                {
+                    serviceSetNamedPipe(obj->element, named_pipe);
                 }
 
                 serviceSetRetryOnFailure(obj->element, config_get_value(obj->parameters, "retry_on_failure"));
@@ -2284,6 +2290,10 @@ static char *service_params[] =
     "ignore_databases",
     "ignore_databases_regex",
     "log_auth_warnings",
+    "query_delimiter",
+    "log_delimiter",
+    "log_filename",
+    "named_pipe",
     NULL
 };
 

@@ -17,10 +17,11 @@
  */
 
 /**
- * @file performancelogroute.c - Read Connection Load Balancing Query Router
+ * @file dbseerroute.c - DBSeer router
  *
  * This is the implementation of a simple query router that balances
- * read connections. It assumes the service is configured with a set
+ * read connections + produces performance logs for DBSeer.
+ * It assumes the service is configured with a set
  * of slaves and that the application clients already split read and write
  * queries. It offers a service to balance the client read connections
  * over this set of slave servers. It does this once only, at the time
@@ -87,6 +88,9 @@
 #include <dcb.h>
 #include <spinlock.h>
 #include <modinfo.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <skygw_types.h>
 #include <skygw_utils.h>
@@ -120,6 +124,8 @@ static void clientReply(ROUTER *instance, void *router_session, GWBUF *queue,
 static void handleError(ROUTER *instance, void *router_session, GWBUF *errbuf,
                         DCB *problem_dcb, error_action_t action, bool *succp);
 static int getCapabilities();
+
+static void* checkNamedPipe(void *args);
 
 
 /** The module object definition */
@@ -194,17 +200,18 @@ GetModuleObject()
 static ROUTER *
 createInstance(SERVICE *service, char **options)
 {
+    char buffer[4096];
     ROUTER_INSTANCE *inst;
     SERVER *server;
     SERVER_REF *sref;
-    int i, n;
+    int i, n, ret;
     BACKEND *backend;
     char *weightby;
     char *log_filename;
     char *log_delimiter;
     char *query_delimiter;
+    char *named_pipe;
     int query_delimiter_size;
-
 
     if ((inst = calloc(1, sizeof(ROUTER_INSTANCE))) == NULL)
     {
@@ -368,6 +375,59 @@ createInstance(SERVICE *service, char **options)
     }
 
     /*
+     * check named pipe.
+     */
+    inst->log_enabled = false;
+    if ((named_pipe = serviceGetNamedPipe(service)) != NULL)
+    {
+        inst->named_pipe = strdup(named_pipe);
+        // check if the file exists first.
+        if (access(inst->named_pipe, F_OK) == 0)
+        {
+            // if exists, check if it is a named pipe.
+            struct stat st;
+            ret = stat(inst->named_pipe, &st);
+
+            // check whether the file is named pipe.
+            if (ret == -1 && errno != ENOENT)
+            {
+                sprintf(buffer, "stat() failed on named pipe: %s", strerror(errno));
+                MXS_ERROR(buffer);
+                free(inst);
+                return NULL;
+            }
+            if (ret == 0 && S_ISFIFO(st.st_mode))
+            {
+                // if it is a named pipe, we delete it and recreate it.
+                unlink(inst->named_pipe);
+            }
+            else
+            {
+                sprintf(buffer, "The file '%s' already exists and it is not a named pipe.", inst->named_pipe);
+                MXS_ERROR(buffer);
+                free(inst);
+                return NULL;
+            }
+        }
+
+        // now create the named pipe.
+        ret = mkfifo(inst->named_pipe, 0660);
+        if (ret == -1)
+        {
+            sprintf(buffer, "mkfifo() failed on named pipe: %s", strerror(errno));
+            MXS_ERROR(buffer);
+            free(inst);
+            return NULL;
+        }
+    }
+    else
+    {
+        MXS_ERROR("You need to specify a named pipe for dbseerroute router.");
+        free(inst);
+        return NULL;
+    }
+
+    /*
      * process logging options.
      */
     if ((log_filename = serviceGetLogFilename(service)) != NULL)
@@ -394,9 +454,23 @@ createInstance(SERVICE *service, char **options)
         inst->log_file = fopen(inst->log_filename, "w");
         if (inst->log_file == NULL)
         {
-            MXS_ERROR("Failed to open a log file for performancelogroute router.");
+            MXS_ERROR("Failed to open a log file for dbseerroute router.");
+            free(inst);
             return NULL;
         }
+    }
+
+    /*
+     * Launch a thread that checks the named pipe.
+     */
+    pthread_t tid;
+    ret = pthread_create(&tid, NULL, checkNamedPipe, (void*) inst);
+    if (ret == -1)
+    {
+        sprintf(buffer, "Couldn't create a thread to check the named pipe: %s", strerror(errno));
+        MXS_ERROR(buffer);
+        free(inst);
+        return NULL;
     }
 
     /*
@@ -1010,17 +1084,20 @@ clientReply(ROUTER *instance, void *router_session, GWBUF *queue, DCB *backend_d
             /* log strucure:
              * timestamp | backend_server_unique_name | backend_server_hostname | latency | sql
              */
-            fprintf(inst->log_file, "%ld%s%s%s%s%s%ld%s%s\n",
-                    timestamp,
-                    delimiter,
-                    server_uniquename,
-                    delimiter,
-                    server_hostname,
-                    delimiter,
-                    millis,
-                    delimiter,
-                    router_cli_ses->sql
-                    );
+            if (inst->log_enabled)
+            {
+                fprintf(inst->log_file, "%ld%s%s%s%s%s%ld%s%s\n",
+                        timestamp,
+                        delimiter,
+                        server_uniquename,
+                        delimiter,
+                        server_hostname,
+                        delimiter,
+                        millis,
+                        delimiter,
+                        router_cli_ses->sql
+                       );
+            }
             router_cli_ses->sql_index = 0;
         }
     }
@@ -1235,4 +1312,42 @@ static int handle_state_switch(DCB* dcb, DCB_REASON reason, void * routersession
     }
 
     return 0;
+}
+
+static void* checkNamedPipe(void *args)
+{
+    int ret;
+    char buffer[2];
+    char buf[4096];
+    ROUTER_INSTANCE* inst = (ROUTER_INSTANCE*) args;
+    char* named_pipe = inst->named_pipe;
+
+    // open named pipe and this will block until middleware opens it.
+    while ((inst->named_pipe_fd = open(named_pipe, O_RDONLY)) > 0)
+    {
+        // 1 for start logging, 0 for stopping.
+        while ((ret = read(inst->named_pipe_fd, buffer, 1)) > 0)
+        {
+            if (buffer[0] == '1')
+            {
+                inst->log_enabled = true;
+            }
+            else if (buffer[0] == '0')
+            {
+                inst->log_enabled = false;
+            }
+        }
+        if (ret == 0)
+        {
+            close(inst->named_pipe_fd);
+        }
+    }
+    if (inst->named_pipe_fd == -1)
+    {
+        sprintf(buf, "Failed to open the named pipe '%s': %s", named_pipe, strerror(errno));
+        MXS_ERROR(buf);
+        return NULL;
+    }
+
+    return NULL;
 }

@@ -1867,6 +1867,26 @@ serviceGetLogFilename(SERVICE *service)
 }
 
 void
+serviceSetNamedPipe(SERVICE* service, char* param)
+{
+    if (service->named_pipe)
+    {
+        free(service->named_pipe);
+        service->named_pipe = NULL;
+    }
+    if (param)
+    {
+        service->named_pipe = strdup(param);
+    }
+}
+
+char *
+serviceGetNamedPipe(SERVICE* service)
+{
+    return service->named_pipe;
+}
+
+void
 serviceSetLogDelimiter(SERVICE* service, char* param)
 {
     if (service->log_delimiter)

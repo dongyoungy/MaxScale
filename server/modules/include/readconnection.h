@@ -95,6 +95,9 @@ typedef struct router_instance
     char *log_delimiter;
     char *query_delimiter;
     int query_delimiter_size;
+    char* named_pipe;
+    int named_pipe_fd;
+    bool log_enabled;
     FILE *log_file;
     struct router_instance
     *next;
