@@ -6,6 +6,8 @@ This document provides an overview of the **dbseerroute** router module and its 
 
 The dbseerroute router is a modified version of the readconnroute router. The performancelogroute router provides simple and lightweight load balancing across a set of servers just like readconnroute router. The router can also be configured to balance connections based on a weighting parameter defined in the server's section. The only difference is that the router logs all committed transactions with necessary information, such as timestamp, server, SQL statements, latency, etc., which can be used later for transaction performance analysis.
 
+**NOTE: dbseerroute requires `autocommit` option from MySQL/MariaDB to be OFF as it detects 'rollback' or 'commit' statements to distinguish different transactions.**
+
 ## Configuration
 
 DBSeerRoute router-specific settings are specified in the configuration file of MaxScale in its specific section. The section can be freely named but the name is used later as a reference from listener section.
