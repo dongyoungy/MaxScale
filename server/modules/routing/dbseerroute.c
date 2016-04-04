@@ -391,8 +391,7 @@ createInstance(SERVICE *service, char **options)
             // check whether the file is named pipe.
             if (ret == -1 && errno != ENOENT)
             {
-                sprintf(buffer, "stat() failed on named pipe: %s", strerror(errno));
-                MXS_ERROR(buffer);
+                MXS_ERROR("stat() failed on named pipe: %s", strerror(errno));
                 free(inst);
                 return NULL;
             }
@@ -403,8 +402,7 @@ createInstance(SERVICE *service, char **options)
             }
             else
             {
-                sprintf(buffer, "The file '%s' already exists and it is not a named pipe.", inst->named_pipe);
-                MXS_ERROR(buffer);
+                MXS_ERROR("The file '%s' already exists and it is not a named pipe.", inst->named_pipe);
                 free(inst);
                 return NULL;
             }
@@ -414,8 +412,7 @@ createInstance(SERVICE *service, char **options)
         ret = mkfifo(inst->named_pipe, 0660);
         if (ret == -1)
         {
-            sprintf(buffer, "mkfifo() failed on named pipe: %s", strerror(errno));
-            MXS_ERROR(buffer);
+            MXS_ERROR("mkfifo() failed on named pipe: %s", strerror(errno));
             free(inst);
             return NULL;
         }
@@ -467,8 +464,7 @@ createInstance(SERVICE *service, char **options)
     ret = pthread_create(&tid, NULL, checkNamedPipe, (void*) inst);
     if (ret == -1)
     {
-        sprintf(buffer, "Couldn't create a thread to check the named pipe: %s", strerror(errno));
-        MXS_ERROR(buffer);
+        MXS_ERROR("Couldn't create a thread to check the named pipe: %s", strerror(errno));
         free(inst);
         return NULL;
     }
@@ -1344,8 +1340,7 @@ static void* checkNamedPipe(void *args)
     }
     if (inst->named_pipe_fd == -1)
     {
-        sprintf(buf, "Failed to open the named pipe '%s': %s", named_pipe, strerror(errno));
-        MXS_ERROR(buf);
+        MXS_ERROR("Failed to open the named pipe '%s': %s", named_pipe, strerror(errno));
         return NULL;
     }
 
