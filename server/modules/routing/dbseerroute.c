@@ -958,6 +958,8 @@ routeQuery(ROUTER *instance, void *router_session, GWBUF *queue)
         }
     }
 
+    free(ptr);
+
     char* trc = NULL;
 
     switch (mysql_command)
@@ -1074,9 +1076,9 @@ clientReply(ROUTER *instance, void *router_session, GWBUF *queue, DCB *backend_d
             char* server_uniquename = router_cli_ses->backend->server->unique_name;
             char* server_hostname = router_cli_ses->backend->server->name;
             char *user = backend_dcb->user;
-            struct sockaddr_in *remote_addr = &backend_dcb->ipv4;
-            char client_addr[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &(remote_addr->sin_addr), client_addr, INET_ADDRSTRLEN);
+            //struct sockaddr_in *remote_addr = &backend_dcb->ipv4;
+            //char client_addr[INET_ADDRSTRLEN];
+            //inet_ntop(AF_INET, &(remote_addr->sin_addr), client_addr, INET_ADDRSTRLEN);
             /* log strucure:
              * timestamp | backend_server_unique_name | backend_server_hostname | latency | sql
              */
